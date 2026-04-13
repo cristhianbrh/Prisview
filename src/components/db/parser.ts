@@ -1,5 +1,17 @@
 import type { Field, TableSchema, SchemaValidationResult } from "./types";
 
+export interface SchemaAnalysis {
+  sourceText: string;
+  tables: TableSchema[];
+  tableMap: Map<string, TableSchema>;
+  tableLineMap: Map<string, number>;
+  fieldLineMap: Map<string, number>;
+  allFieldNames: string[];
+  validation: SchemaValidationResult;
+}
+
+let lastAnalysisCache: SchemaAnalysis | null = null;
+
 function parseDefaultValue(raw: string): string | number | boolean | null {
   const value = raw.trim();
 
@@ -110,7 +122,24 @@ function parseField(line: string): Field | null {
   };
 }
 
-export function parseSchema(input: string): TableSchema[] {
+function normalizeType(type: string) {
+  const value = type.toLowerCase();
+
+  if (value === "int") return "integer";
+  if (value === "integer") return "integer";
+  if (value === "string") return "string";
+  if (value === "text") return "string";
+  if (value === "bool") return "boolean";
+  if (value === "boolean") return "boolean";
+  if (value === "datetime") return "datetime";
+  if (value === "date") return "date";
+  if (value === "float") return "float";
+  if (value === "uuid") return "uuid";
+
+  return value;
+}
+
+function buildTablesFromSource(input: string): TableSchema[] {
   const lines = input.split("\n");
 
   const tables: TableSchema[] = [];
@@ -142,57 +171,44 @@ export function parseSchema(input: string): TableSchema[] {
   return tables;
 }
 
-export function validateSchema(
+function buildLineMaps(sourceText: string) {
+  const tableLineMap = new Map<string, number>();
+  const fieldLineMap = new Map<string, number>();
+
+  const lines = sourceText.split("\n");
+  let currentTable: string | null = null;
+
+  lines.forEach((rawLine, index) => {
+    const lineNumber = index + 1;
+    if (!rawLine.trim()) return;
+
+    const isFieldLine = /^\s+/.test(rawLine);
+
+    if (!isFieldLine) {
+      currentTable = rawLine.trim();
+      tableLineMap.set(currentTable, lineNumber);
+      return;
+    }
+
+    if (!currentTable) return;
+
+    const parts = rawLine.trim().split(/\s+/);
+    if (parts.length >= 1) {
+      fieldLineMap.set(`${currentTable}.${parts[0]}`, lineNumber);
+    }
+  });
+
+  return { tableLineMap, fieldLineMap };
+}
+
+function validateTablesInternal(
   tables: TableSchema[],
-  sourceText?: string,
+  tableLineMap: Map<string, number>,
+  fieldLineMap: Map<string, number>,
 ): SchemaValidationResult {
   const errors: SchemaValidationResult["errors"] = [];
 
   const tableMap = new Map<string, TableSchema>();
-  const tableLineMap = new Map<string, number>();
-  const fieldLineMap = new Map<string, number>();
-
-  if (sourceText) {
-    const lines = sourceText.split("\n");
-    let currentTable: string | null = null;
-
-    lines.forEach((rawLine, index) => {
-      const lineNumber = index + 1;
-      if (!rawLine.trim()) return;
-
-      const isFieldLine = /^\s+/.test(rawLine);
-
-      if (!isFieldLine) {
-        currentTable = rawLine.trim();
-        tableLineMap.set(currentTable, lineNumber);
-        return;
-      }
-
-      if (!currentTable) return;
-
-      const parts = rawLine.trim().split(/\s+/);
-      if (parts.length >= 1) {
-        fieldLineMap.set(`${currentTable}.${parts[0]}`, lineNumber);
-      }
-    });
-  }
-
-  const normalizeType = (type: string) => {
-    const value = type.toLowerCase();
-
-    if (value === "int") return "integer";
-    if (value === "integer") return "integer";
-    if (value === "string") return "string";
-    if (value === "text") return "string";
-    if (value === "bool") return "boolean";
-    if (value === "boolean") return "boolean";
-    if (value === "datetime") return "datetime";
-    if (value === "date") return "date";
-    if (value === "float") return "float";
-    if (value === "uuid") return "uuid";
-
-    return value;
-  };
 
   for (const table of tables) {
     if (tableMap.has(table.name)) {
@@ -295,4 +311,53 @@ export function validateSchema(
     valid: errors.length === 0,
     errors,
   };
+}
+
+export function analyzeSchema(sourceText: string): SchemaAnalysis {
+  if (lastAnalysisCache?.sourceText === sourceText) {
+    return lastAnalysisCache;
+  }
+
+  const tables = buildTablesFromSource(sourceText);
+  const { tableLineMap, fieldLineMap } = buildLineMaps(sourceText);
+
+  const allFieldNames = Array.from(
+    new Set(tables.flatMap((table) => table.fields.map((field) => field.name))),
+  );
+
+  const tableMap = new Map(tables.map((table) => [table.name, table]));
+  const validation = validateTablesInternal(tables, tableLineMap, fieldLineMap);
+
+  const analysis: SchemaAnalysis = {
+    sourceText,
+    tables,
+    tableMap,
+    tableLineMap,
+    fieldLineMap,
+    allFieldNames,
+    validation,
+  };
+
+  lastAnalysisCache = analysis;
+  return analysis;
+}
+
+export function parseSchema(input: string): TableSchema[] {
+  return analyzeSchema(input).tables;
+}
+
+export function validateSchema(
+  tables: TableSchema[],
+  sourceText?: string,
+): SchemaValidationResult {
+  // Cuando tenemos el sourceText, usamos el análisis compartido para evitar
+  // reprocesar lógicas en sitios distintos.
+  if (typeof sourceText === "string") {
+    return analyzeSchema(sourceText).validation;
+  }
+
+  const tableLineMap = new Map<string, number>();
+  const fieldLineMap = new Map<string, number>();
+
+  return validateTablesInternal(tables, tableLineMap, fieldLineMap);
 }
