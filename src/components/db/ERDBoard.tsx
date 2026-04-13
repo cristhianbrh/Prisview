@@ -17,6 +17,7 @@ import { EditorView } from "@codemirror/view";
 
 import TableNode from "./TableNode";
 import { schemaCompletionSource } from "./autocomplete";
+import { convertOrmToDsl, type SupportedOrmType } from "./ormImport";
 import {
   buildInitialGraph,
   buildRawEdges,
@@ -120,6 +121,14 @@ function ERDBoardInner() {
   >([]);
 
   const [leftPanelWidth, setLeftPanelWidth] = useState(50);
+
+  const [showImportPanel, setShowImportPanel] = useState(false);
+  const [importMode, setImportMode] = useState<"text" | "file">("text");
+  const [importOrmType, setImportOrmType] =
+    useState<SupportedOrmType>("prisma");
+  const [importText, setImportText] = useState("");
+  const [importErrors, setImportErrors] = useState<string[]>([]);
+  const [isImporting, setIsImporting] = useState(false);
 
   const persistedNodePositionsRef = useRef<NodePositionMap>(
     getStoredJson(STORAGE_KEYS.nodePositions, {}),
@@ -251,6 +260,80 @@ function ERDBoardInner() {
       }),
     [],
   );
+
+  const resetImportPanel = () => {
+    setImportMode("text");
+    setImportOrmType("prisma");
+    setImportText("");
+    setImportErrors([]);
+    setIsImporting(false);
+  };
+
+  const openImportPanel = () => {
+    resetImportPanel();
+    setShowImportPanel(true);
+  };
+
+  const closeImportPanel = () => {
+    setShowImportPanel(false);
+    resetImportPanel();
+  };
+
+  const applyImportedSchema = (importedSchemaText: string) => {
+    const normalizedImported = importedSchemaText.trim();
+    if (!normalizedImported) return;
+
+    setSchemaText((prev) => {
+      const trimmedPrev = prev.trim();
+
+      if (!trimmedPrev) {
+        return normalizedImported;
+      }
+
+      return `${trimmedPrev}\n\n${normalizedImported}`;
+    });
+
+    setShowSqlPreview(false);
+    setSqlPreview("");
+    setSchemaErrors([]);
+    closeImportPanel();
+  };
+
+  const handleImportSave = async () => {
+    setImportErrors([]);
+    setIsImporting(true);
+
+    try {
+      const result = convertOrmToDsl(importOrmType, importText);
+
+      if (!result.success) {
+        setImportErrors(result.errors);
+        return;
+      }
+
+      applyImportedSchema(result.schemaText);
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const handleImportFileChange = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setImportErrors([]);
+
+    try {
+      const text = await file.text();
+      setImportText(text);
+    } catch {
+      setImportErrors(["No pude leer el archivo seleccionado."]);
+    } finally {
+      event.target.value = "";
+    }
+  };
 
   const autocompleteTheme = useMemo(
     () =>
@@ -483,7 +566,7 @@ function ERDBoardInner() {
   return (
     <div
       ref={containerRef}
-      className="flex h-screen w-full overflow-hidden bg-slate-950 text-slate-100"
+      className="relative flex h-screen w-full overflow-hidden bg-slate-950 text-slate-100"
     >
       <section
         className="flex h-full min-w-[320px] shrink-0 flex-col bg-slate-900"
@@ -520,6 +603,13 @@ function ERDBoardInner() {
               <option value="sqlite">SQLite</option>
             </select>
           </div>
+
+          <button
+            onClick={openImportPanel}
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-blue-500 hover:text-blue-400"
+          >
+            Importar
+          </button>
 
           <button
             onClick={clearAll}
@@ -641,6 +731,144 @@ function ERDBoardInner() {
           </ReactFlow>
         </div>
       </section>
+      {showImportPanel ? (
+        <div
+          className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/70 px-4 backdrop-blur-sm"
+          onClick={closeImportPanel}
+        >
+          <div
+            className="flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-slate-800 bg-slate-900 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-slate-800 px-6 py-5">
+              <div>
+                <h2 className="text-base font-semibold text-slate-100">
+                  Importar esquema ORM
+                </h2>
+                <p className="mt-1 text-sm text-slate-400">
+                  Pega un esquema o carga un archivo. Esta primera versión
+                  soporta Prisma.
+                </p>
+              </div>
+
+              <button
+                onClick={closeImportPanel}
+                className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-red-500 hover:text-red-400"
+              >
+                Cerrar
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto px-6 py-5">
+              <div className="mb-5 flex flex-wrap items-center gap-3">
+                <label className="flex items-center gap-2 text-sm text-slate-300">
+                  <input
+                    type="radio"
+                    name="import-mode"
+                    checked={importMode === "text"}
+                    onChange={() => setImportMode("text")}
+                  />
+                  Editor de texto
+                </label>
+
+                <label className="flex items-center gap-2 text-sm text-slate-300">
+                  <input
+                    type="radio"
+                    name="import-mode"
+                    checked={importMode === "file"}
+                    onChange={() => setImportMode("file")}
+                  />
+                  Archivo
+                </label>
+
+                <div className="ml-auto flex items-center gap-2">
+                  <span className="text-sm text-slate-400">Tipo ORM:</span>
+                  <select
+                    value={importOrmType}
+                    onChange={(e) =>
+                      setImportOrmType(e.target.value as SupportedOrmType)
+                    }
+                    className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-blue-400 outline-none"
+                  >
+                    <option value="prisma">Prisma</option>
+                  </select>
+                </div>
+              </div>
+
+              {importMode === "file" ? (
+                <div className="mb-5">
+                  <label className="mb-2 block text-sm text-slate-400">
+                    Selecciona un archivo ORM
+                  </label>
+
+                  <input
+                    type="file"
+                    accept=".prisma,.txt,.schema"
+                    onChange={handleImportFileChange}
+                    className="block w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-300 file:mr-3 file:rounded-md file:border-0 file:bg-slate-800 file:px-3 file:py-2 file:text-sm file:text-slate-200"
+                  />
+                </div>
+              ) : null}
+
+              <div className="mb-5">
+                <label className="mb-2 block text-sm text-slate-400">
+                  {importMode === "text"
+                    ? "Pega aquí tu esquema ORM"
+                    : "Contenido cargado del archivo"}
+                </label>
+
+                <textarea
+                  value={importText}
+                  onChange={(e) => setImportText(e.target.value)}
+                  placeholder={`model User {
+  id Int @id @default(autoincrement())
+  email String @unique
+  posts Post[]
+}
+
+model Post {
+  id Int @id @default(autoincrement())
+  title String
+  userId Int
+  user User @relation(fields: [userId], references: [id])
+}`}
+                  className="min-h-[300px] w-full resize-y rounded-2xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 outline-none transition focus:border-blue-500"
+                />
+              </div>
+
+              {importErrors.length > 0 ? (
+                <div className="rounded-2xl border border-red-900/40 bg-red-950/40 px-4 py-3">
+                  <p className="mb-2 text-sm font-medium text-red-300">
+                    No pude importar este esquema:
+                  </p>
+                  <ul className="space-y-1 text-sm text-red-200">
+                    {importErrors.map((error, index) => (
+                      <li key={`${error}-${index}`}>- {error}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-slate-800 px-6 py-4">
+              <button
+                onClick={closeImportPanel}
+                className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-slate-200 transition hover:border-slate-500"
+              >
+                Cancelar
+              </button>
+
+              <button
+                onClick={handleImportSave}
+                disabled={isImporting || !importText.trim()}
+                className="rounded-lg border border-blue-500 bg-blue-500/10 px-4 py-2 text-sm text-blue-400 transition hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isImporting ? "Importando..." : "Convertir y agregar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
