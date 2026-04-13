@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   Controls,
@@ -11,9 +11,21 @@ import {
 import TableNode from "./TableNode";
 import { parseSchema } from "./parser";
 
-const initialText = `User id int, name string, email string
-Post id int, title string, userId int
-Comment id int, body string, postId int, userId int`;
+const initialText = `User
+  id int pk
+  name string
+  email string
+
+Post
+  id int pk
+  title string
+  userId int ref User.id
+
+Comment
+  id int pk
+  body string
+  postId int ref Post.id
+  userId int ref User.id`;
 
 const nodeTypes = {
   tableNode: TableNode,
@@ -26,8 +38,8 @@ function buildNodesFromText(text: string): Node[] {
     id: table.name,
     type: "tableNode",
     position: {
-      x: 80 + (index % 3) * 320,
-      y: 80 + Math.floor(index / 3) * 260,
+      x: 80 + (index % 3) * 340,
+      y: 80 + Math.floor(index / 3) * 280,
     },
     data: {
       label: table.name,
@@ -43,27 +55,27 @@ function buildEdgesFromText(text: string): Edge[] {
 
   tables.forEach((table) => {
     table.fields.forEach((field) => {
-      const fieldName = field.name.toLowerCase();
+      if (!field.reference) return;
 
-      if (!fieldName.endsWith("id") || fieldName === "id") {
-        return;
-      }
-
-      const guessedTarget = field.name.replace(/Id$/i, "").toLowerCase();
       const targetTable = tables.find(
-        (candidate) => candidate.name.toLowerCase() === guessedTarget,
+        (candidate) => candidate.name === field.reference?.table,
       );
 
-      if (!targetTable) {
-        return;
-      }
+      if (!targetTable) return;
 
       edges.push({
-        id: `${table.name}-${field.name}-${targetTable.name}`,
+        id: `${table.name}-${field.name}-${field.reference.table}-${field.reference.field}`,
         source: table.name,
         target: targetTable.name,
-        animated: false,
-        style: { stroke: "#3b82f6", strokeWidth: 1.5 },
+        label: `${field.name} → ${field.reference.table}.${field.reference.field}`,
+        style: {
+          stroke: "#3b82f6",
+          strokeWidth: 1.5,
+        },
+        labelStyle: {
+          fill: "#94a3b8",
+          fontSize: 10,
+        },
       });
     });
   });
@@ -71,9 +83,18 @@ function buildEdgesFromText(text: string): Edge[] {
   return edges;
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
 function ERDBoardInner() {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
   const [schemaText, setSchemaText] = useState(initialText);
   const [debouncedText, setDebouncedText] = useState(initialText);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(50);
+  const [isResizing, setIsResizing] = useState(false);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -82,6 +103,39 @@ function ERDBoardInner() {
 
     return () => window.clearTimeout(timer);
   }, [schemaText]);
+
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const container = containerRef.current;
+      if (!container) return;
+
+      const rect = container.getBoundingClientRect();
+      const nextWidth = ((event.clientX - rect.left) / rect.width) * 100;
+
+      setLeftPanelWidth(clamp(nextWidth, 25, 75));
+    };
+
+    const handlePointerUp = () => {
+      setIsResizing(false);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+  }, [isResizing]);
 
   const nodes = useMemo(
     () => buildNodesFromText(debouncedText),
@@ -95,17 +149,119 @@ function ERDBoardInner() {
   const clearAll = () => {
     setSchemaText("");
     setDebouncedText("");
+    textareaRef.current?.focus();
+  };
+
+  const handleResizeStart = () => {
+    setIsResizing(true);
+  };
+
+  const handleTextareaKeyDown = (
+    event: React.KeyboardEvent<HTMLTextAreaElement>,
+  ) => {
+    const textarea = event.currentTarget;
+
+    if (event.key !== "Tab") return;
+
+    event.preventDefault();
+
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const value = textarea.value;
+    const indent = "  ";
+
+    if (event.shiftKey) {
+      const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+      const selectedText = value.slice(lineStart, end);
+      const lines = selectedText.split("\n");
+
+      const updatedLines = lines.map((line, index) => {
+        const isFirstLine = index === 0;
+        const effectiveLine = isFirstLine
+          ? value.slice(lineStart, lineStart + lines[0].length)
+          : line;
+
+        if (effectiveLine.startsWith(indent))
+          return effectiveLine.slice(indent.length);
+        if (effectiveLine.startsWith("\t")) return effectiveLine.slice(1);
+        if (effectiveLine.startsWith(" ")) return effectiveLine.slice(1);
+        return effectiveLine;
+      });
+
+      const replacement = updatedLines.join("\n");
+      const before = value.slice(0, lineStart);
+      const after = value.slice(end);
+      const nextValue = before + replacement + after;
+
+      setSchemaText(nextValue);
+
+      requestAnimationFrame(() => {
+        const firstLineRemoved = lines[0]?.startsWith(indent)
+          ? indent.length
+          : lines[0]?.startsWith("\t")
+            ? 1
+            : lines[0]?.startsWith(" ")
+              ? 1
+              : 0;
+
+        const removedTotal = lines.reduce((acc, line) => {
+          if (line.startsWith(indent)) return acc + indent.length;
+          if (line.startsWith("\t")) return acc + 1;
+          if (line.startsWith(" ")) return acc + 1;
+          return acc;
+        }, 0);
+
+        textarea.selectionStart = Math.max(lineStart, start - firstLineRemoved);
+        textarea.selectionEnd = Math.max(lineStart, end - removedTotal);
+      });
+
+      return;
+    }
+
+    if (start !== end && value.slice(start, end).includes("\n")) {
+      const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+      const selectedText = value.slice(lineStart, end);
+      const lines = selectedText.split("\n");
+      const updatedLines = lines.map((line) => `${indent}${line}`);
+      const replacement = updatedLines.join("\n");
+
+      const before = value.slice(0, lineStart);
+      const after = value.slice(end);
+      const nextValue = before + replacement + after;
+
+      setSchemaText(nextValue);
+
+      requestAnimationFrame(() => {
+        textarea.selectionStart = start + indent.length;
+        textarea.selectionEnd = end + indent.length * lines.length;
+      });
+
+      return;
+    }
+
+    const nextValue = value.slice(0, start) + indent + value.slice(end);
+    setSchemaText(nextValue);
+
+    requestAnimationFrame(() => {
+      textarea.selectionStart = textarea.selectionEnd = start + indent.length;
+    });
   };
 
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-slate-950 text-slate-100">
-      <section className="flex h-full w-1/2 min-w-[320px] flex-col border-r border-slate-800 bg-slate-900">
+    <div
+      ref={containerRef}
+      className="flex h-screen w-full overflow-hidden bg-slate-950 text-slate-100"
+    >
+      <section
+        className="flex h-full min-w-[320px] flex-col bg-slate-900"
+        style={{ width: `${leftPanelWidth}%` }}
+      >
         <div className="border-b border-slate-800 px-4 py-3">
           <h1 className="text-sm font-semibold text-slate-100">
             Schema Editor
           </h1>
           <p className="mt-1 text-xs text-slate-400">
-            Sintaxis: Tabla campo tipo, campo tipo
+            Usa Tab para indentar y Shift+Tab para quitar indentación.
           </p>
         </div>
 
@@ -128,14 +284,29 @@ function ERDBoardInner() {
 
         <div className="flex-1 p-4">
           <textarea
+            ref={textareaRef}
             value={schemaText}
             onChange={(e) => setSchemaText(e.target.value)}
+            onKeyDown={handleTextareaKeyDown}
             spellCheck={false}
             className="h-full w-full resize-none rounded-2xl border border-slate-800 bg-slate-950 p-4 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 focus:border-blue-500"
-            placeholder="User id int, name string, email string"
+            placeholder={`User
+  id int pk
+  name string
+  email string`}
           />
         </div>
       </section>
+
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Redimensionar paneles"
+        onPointerDown={handleResizeStart}
+        className="group relative w-2 cursor-col-resize bg-slate-900"
+      >
+        <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-slate-700 transition group-hover:bg-blue-500" />
+      </div>
 
       <section className="h-full flex-1 bg-slate-950">
         <div className="h-full w-full">

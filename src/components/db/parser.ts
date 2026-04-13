@@ -1,40 +1,94 @@
-import type { TableSchema } from "./types";
+import type { Field, TableSchema } from "./types";
 
-export function parseSchema(input: string): TableSchema[] {
-  const lines = input
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+function parseField(line: string): Field | null {
+  const parts = line.trim().split(/\s+/);
 
-  return lines
-    .map((line) => {
-      const [tableName, rawFields] = line.split(/\s+(.+)/);
+  if (parts.length < 2) {
+    return null;
+  }
 
-      if (!tableName || !rawFields) {
-        return null;
+  const name = parts[0];
+  const type = parts[1];
+
+  let isPrimary = false;
+  let reference: Field["reference"];
+
+  let i = 2;
+  while (i < parts.length) {
+    const token = parts[i]?.toLowerCase();
+
+    if (token === "pk") {
+      isPrimary = true;
+      i += 1;
+      continue;
+    }
+
+    if (token === "ref") {
+      const refValue = parts[i + 1];
+
+      if (refValue) {
+        const [table, field] = refValue.split(".");
+        if (table && field) {
+          reference = { table, field };
+        }
       }
 
-      const fields = rawFields
-        .split(",")
-        .map((field) => field.trim())
-        .filter(Boolean)
-        .map((field, index) => {
-          const parts = field.split(/\s+/);
-          const name = parts[0] ?? `field_${index + 1}`;
-          const type = parts[1] ?? "string";
-          const isPrimary = name.toLowerCase() === "id";
+      i += 2;
+      continue;
+    }
 
-          return {
-            name,
-            type,
-            isPrimary,
-          };
-        });
+    i += 1;
+  }
 
-      return {
-        name: tableName,
-        fields,
+  return {
+    name,
+    type,
+    isPrimary,
+    reference,
+  };
+}
+
+export function parseSchema(input: string): TableSchema[] {
+  const lines = input.split("\n");
+
+  const tables: TableSchema[] = [];
+  let currentTable: TableSchema | null = null;
+
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\t/g, "  ");
+
+    if (!line.trim()) {
+      continue;
+    }
+
+    const isFieldLine = /^\s+/.test(rawLine);
+
+    if (!isFieldLine) {
+      if (currentTable) {
+        tables.push(currentTable);
+      }
+
+      currentTable = {
+        name: line.trim(),
+        fields: [],
       };
-    })
-    .filter((table): table is TableSchema => table !== null);
+
+      continue;
+    }
+
+    if (!currentTable) {
+      continue;
+    }
+
+    const field = parseField(line);
+    if (field) {
+      currentTable.fields.push(field);
+    }
+  }
+
+  if (currentTable) {
+    tables.push(currentTable);
+  }
+
+  return tables;
 }

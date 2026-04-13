@@ -6,10 +6,16 @@ export type FieldType =
   | "float"
   | "uuid";
 
+export interface FieldReference {
+  table: string;
+  field: string;
+}
+
 export interface Field {
   name: string;
   type: FieldType | string;
   isPrimary?: boolean;
+  reference?: FieldReference;
 }
 
 export interface TableSchema {
