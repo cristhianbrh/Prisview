@@ -121,6 +121,8 @@ function ERDBoardInner() {
     buildInitialGraph(schemaText, persistedNodePositionsRef.current),
   );
 
+  const nodesRef = useRef(initialGraphRef.current.nodes);
+
   const [nodes, setNodes, onNodesChange] = useNodesState(
     initialGraphRef.current.nodes,
   );
@@ -133,14 +135,20 @@ function ERDBoardInner() {
   };
 
   const handleInit = () => {
-    const viewport = getStoredJson<
-      { x: number; y: number; zoom: number } | null
-    >(STORAGE_KEYS.viewport, null);
+    const viewport = getStoredJson<{
+      x: number;
+      y: number;
+      zoom: number;
+    } | null>(STORAGE_KEYS.viewport, null);
 
     if (viewport) {
       setViewport(viewport);
     }
   };
+
+  useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
 
   useEffect(() => {
     setStoredValue(STORAGE_KEYS.leftPanelWidth, String(leftPanelWidth));
@@ -208,23 +216,55 @@ function ERDBoardInner() {
     [],
   );
 
+  const autocompleteTheme = EditorView.theme({
+    ".cm-tooltip": {
+      backgroundColor: "#020617",
+      border: "1px solid #1e293b",
+      borderRadius: "12px",
+      padding: "4px",
+    },
+    ".cm-tooltip-autocomplete": {
+      backgroundColor: "#020617",
+    },
+    ".cm-tooltip-autocomplete ul": {
+      fontSize: "13px",
+    },
+    ".cm-tooltip-autocomplete li": {
+      padding: "6px 10px",
+      borderRadius: "8px",
+      color: "#cbd5f5",
+      cursor: "pointer",
+    },
+    ".cm-tooltip-autocomplete li[aria-selected]": {
+      backgroundColor: "#1e293b",
+      color: "#60a5fa",
+    },
+    ".cm-tooltip-autocomplete li:hover": {
+      backgroundColor: "#1e293b",
+    },
+  });
+
   const editorExtensions = useMemo(
     () => [
       EditorView.lineWrapping,
       lintGutter(),
       schemaLinter,
       schemaAutocomplete,
+      autocompleteTheme,
       EditorView.theme({
         "&": {
           height: "100%",
           minHeight: "0",
-          backgroundColor: "#020617",
+          //   backgroundColor: "#020617",
+          backgroundColor: "transparent !important",
+
           color: "#e2e8f0",
           fontSize: "14px",
         },
         ".cm-editor": {
           height: "100%",
           minHeight: "0",
+          backgroundColor: "transparent",
         },
         ".cm-scroller": {
           overflow: "auto",
@@ -241,6 +281,7 @@ function ERDBoardInner() {
         ".cm-content": {
           padding: "16px",
           minHeight: "100%",
+          backgroundColor: "transparent",
         },
         "&.cm-focused": {
           outline: "none",
@@ -250,6 +291,9 @@ function ERDBoardInner() {
         },
         ".cm-diagnostic": {
           fontSize: "12px",
+        },
+        "cm-activeLine": {
+          backgroundColor: "#0f172a",
         },
       }),
     ],
@@ -286,24 +330,20 @@ function ERDBoardInner() {
   }, [schemaText]);
 
   useEffect(() => {
+    const persistedPositions = getStoredJson<NodePositionMap>(
+      STORAGE_KEYS.nodePositions,
+      {},
+    );
+
     const nextRawNodes = buildRawNodes(debouncedText);
+    const mergedNodes = mergeNodesPreservingPositions(
+      nodesRef.current,
+      nextRawNodes,
+      persistedPositions,
+    );
 
-    setNodes((prevNodes) => {
-      const persistedPositions = getStoredJson<NodePositionMap>(
-        STORAGE_KEYS.nodePositions,
-        {},
-      );
-
-      const mergedNodes = mergeNodesPreservingPositions(
-        prevNodes,
-        nextRawNodes,
-        persistedPositions,
-      );
-
-      setEdges(buildRawEdges(debouncedText, mergedNodes));
-      return mergedNodes;
-    });
-  }, [debouncedText, setNodes, setEdges]);
+    setNodes(mergedNodes);
+  }, [debouncedText, setNodes]);
 
   useEffect(() => {
     if (!showSqlPreview) return;
@@ -506,7 +546,6 @@ function ERDBoardInner() {
           <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-950">
             <CodeMirror
               value={schemaText}
-              theme="dark"
               basicSetup={{
                 foldGutter: false,
                 dropCursor: false,

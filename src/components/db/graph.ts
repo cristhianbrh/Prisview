@@ -1,10 +1,5 @@
 import dagre from "@dagrejs/dagre";
-import {
-  MarkerType,
-  Position,
-  type Edge,
-  type Node,
-} from "@xyflow/react";
+import { MarkerType, Position, type Edge, type Node } from "@xyflow/react";
 import { parseSchema } from "./parser";
 
 const NODE_WIDTH = 280;
@@ -227,12 +222,19 @@ export function buildInitialGraph(
   persistedPositions: NodePositionMap,
 ) {
   const rawNodes = buildRawNodes(text);
-  const layoutedNodes = getLayoutedElements(rawNodes, []).nodes;
+
+  // El layout inicial debe considerar relaciones reales.
+  const rawEdges = buildRawEdges(text, rawNodes);
+
+  const layoutedNodes = getLayoutedElements(rawNodes, rawEdges).nodes;
   const hydratedNodes = hydrateNodePositions(layoutedNodes, persistedPositions);
-  const rawEdges = buildRawEdges(text, hydratedNodes);
+
+  // Recalcular edges con posiciones ya hidratadas para que el lado
+  // izquierdo/derecho de los handles quede correcto.
+  const hydratedEdges = buildRawEdges(text, hydratedNodes);
 
   return {
     nodes: hydratedNodes,
-    edges: rawEdges,
+    edges: hydratedEdges,
   };
 }
