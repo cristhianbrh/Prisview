@@ -16,6 +16,7 @@ import { parseSchema, validateSchema } from "./parser";
 import CodeMirror from "@uiw/react-codemirror";
 import { EditorView } from "@codemirror/view";
 import { linter, lintGutter } from "@codemirror/lint";
+import { autocompletion } from "@codemirror/autocomplete";
 
 const initialText = `User
   id int pk
@@ -238,6 +239,108 @@ function getLayoutedElements(nodes: Node[], edges: Edge[]) {
   };
 }
 
+const staticSchemaKeywords = [
+  { label: "pk", type: "keyword" as const },
+  { label: "not null", type: "keyword" as const },
+  { label: "null", type: "keyword" as const },
+  { label: "unique", type: "keyword" as const },
+  { label: "default", type: "keyword" as const },
+  { label: "ref", type: "keyword" as const },
+  { label: "autoincrement", type: "keyword" as const },
+
+  { label: "int", type: "type" as const },
+  { label: "integer", type: "type" as const },
+  { label: "string", type: "type" as const },
+  { label: "text", type: "type" as const },
+  { label: "boolean", type: "type" as const },
+  { label: "bool", type: "type" as const },
+  { label: "date", type: "type" as const },
+  { label: "datetime", type: "type" as const },
+  { label: "float", type: "type" as const },
+  { label: "uuid", type: "type" as const },
+];
+
+function schemaCompletionSource(context: any) {
+  const word = context.matchBefore(/[A-Za-z_][\w.]*/);
+  const doc = context.state.doc.toString();
+  const tables = parseSchema(doc);
+
+  if (!word && !context.explicit) {
+    return null;
+  }
+
+  const from = word ? word.from : context.pos;
+  const text = word ? word.text : "";
+
+  const line = context.state.doc.lineAt(context.pos).text;
+  const beforeCursor = line.slice(
+    0,
+    context.pos - context.state.doc.lineAt(context.pos).from,
+  );
+
+  // Caso 1: después de "ref " sugerir tablas
+  if (/\bref\s+[A-Za-z_]*$/.test(beforeCursor)) {
+    return {
+      from,
+      options: tables.map((table) => ({
+        label: table.name,
+        type: "class",
+      })),
+    };
+  }
+
+  // Caso 2: escribiendo "Tabla." sugerir campos de esa tabla
+  const tableDotMatch = text.match(/^([A-Za-z_]\w*)\.$/);
+  if (tableDotMatch) {
+    const tableName = tableDotMatch[1];
+    const table = tables.find((t) => t.name === tableName);
+
+    if (!table) return null;
+
+    return {
+      from,
+      options: table.fields.map((field) => ({
+        label: `${tableName}.${field.name}`,
+        type: "property",
+      })),
+      validFor: /^[A-Za-z_][\w.]*$/,
+    };
+  }
+
+  // Caso 3: escribiendo "Tabla.id" filtrar campos de esa tabla
+  const tableFieldMatch = text.match(/^([A-Za-z_]\w*)\.([\w]*)$/);
+  if (tableFieldMatch) {
+    const tableName = tableFieldMatch[1];
+    const fieldPrefix = tableFieldMatch[2].toLowerCase();
+    const table = tables.find((t) => t.name === tableName);
+
+    if (!table) return null;
+
+    return {
+      from,
+      options: table.fields
+        .filter((field) => field.name.toLowerCase().startsWith(fieldPrefix))
+        .map((field) => ({
+          label: `${tableName}.${field.name}`,
+          type: "property",
+        })),
+      validFor: /^[A-Za-z_][\w.]*$/,
+    };
+  }
+
+  // Caso 4: sugerencias generales, incluyendo nombres de tablas
+  const tableOptions = tables.map((table) => ({
+    label: table.name,
+    type: "class" as const,
+  }));
+
+  return {
+    from,
+    options: [...staticSchemaKeywords, ...tableOptions],
+    validFor: /^[A-Za-z_]\w*$/,
+  };
+}
+
 function buildInitialGraph(text: string) {
   const rawNodes = buildRawNodes(text);
   const layoutedNodes = getLayoutedElements(rawNodes, []).nodes;
@@ -455,10 +558,15 @@ function ERDBoardInner() {
       });
   });
 
+  const schemaAutocomplete = autocompletion({
+    override: [schemaCompletionSource],
+  });
+
   const editorExtensions = [
     EditorView.lineWrapping,
     lintGutter(),
     schemaLinter,
+    schemaAutocomplete,
     EditorView.theme({
       "&": {
         height: "100%",
@@ -474,11 +582,11 @@ function ERDBoardInner() {
       ".cm-scroller": {
         overflow: "auto",
       },
-    //   ".cm-scroller": {
-    //     fontFamily:
-    //       'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-    //     lineHeight: "1.5rem",
-    //   },
+      //   ".cm-scroller": {
+      //     fontFamily:
+      //       'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+      //     lineHeight: "1.5rem",
+      //   },
       ".cm-gutters": {
         backgroundColor: "#0f172a",
         color: "#64748b",
@@ -743,6 +851,7 @@ function ERDBoardInner() {
                 allowMultipleSelections: false,
                 indentOnInput: false,
                 lineNumbers: true,
+                autocompletion: true,
               }}
               extensions={editorExtensions}
               onChange={(value) => setSchemaText(value)}

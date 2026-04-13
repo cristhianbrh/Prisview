@@ -177,6 +177,23 @@ export function validateSchema(
     });
   }
 
+  const normalizeType = (type: string) => {
+    const value = type.toLowerCase();
+
+    if (value === "int") return "integer";
+    if (value === "integer") return "integer";
+    if (value === "string") return "string";
+    if (value === "text") return "string";
+    if (value === "bool") return "boolean";
+    if (value === "boolean") return "boolean";
+    if (value === "datetime") return "datetime";
+    if (value === "date") return "date";
+    if (value === "float") return "float";
+    if (value === "uuid") return "uuid";
+
+    return value;
+  };
+
   for (const table of tables) {
     if (tableMap.has(table.name)) {
       errors.push({
@@ -246,16 +263,29 @@ export function validateSchema(
         continue;
       }
 
-      const targetFieldExists = targetTable.fields.some(
+      const targetField = targetTable.fields.find(
         (candidate) => candidate.name === field.reference?.field,
       );
 
-      if (!targetFieldExists) {
+      if (!targetField) {
         errors.push({
           table: table.name,
           field: field.name,
           line: fieldLineMap.get(`${table.name}.${field.name}`),
           message: `El campo "${field.name}" referencia "${field.reference.table}.${field.reference.field}", pero ese campo no existe.`,
+        });
+        continue;
+      }
+
+      const sourceType = normalizeType(field.type);
+      const targetType = normalizeType(targetField.type);
+
+      if (sourceType !== targetType) {
+        errors.push({
+          table: table.name,
+          field: field.name,
+          line: fieldLineMap.get(`${table.name}.${field.name}`),
+          message: `El campo "${field.name}" es de tipo "${field.type}" pero referencia "${field.reference.table}.${targetField.name}" que es de tipo "${targetField.type}".`,
         });
       }
     }
