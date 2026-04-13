@@ -35,6 +35,7 @@ import {
   removeStoredValues,
   setStoredValue,
 } from "./storage";
+import { toBlob } from "html-to-image";
 
 const initialText = `User
   id int pk
@@ -95,6 +96,22 @@ function getInitialDialect(): SqlDialect {
     : "postgres";
 }
 
+async function copyBlobToClipboard(blob: Blob) {
+  if (
+    typeof window === "undefined" ||
+    typeof ClipboardItem === "undefined" ||
+    !navigator.clipboard?.write
+  ) {
+    throw new Error("Tu navegador no soporta copiar imágenes al portapapeles.");
+  }
+
+  await navigator.clipboard.write([
+    new ClipboardItem({
+      [blob.type]: blob,
+    }),
+  ]);
+}
+
 function ERDBoardInner() {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -129,6 +146,8 @@ function ERDBoardInner() {
   const [importText, setImportText] = useState("");
   const [importErrors, setImportErrors] = useState<string[]>([]);
   const [isImporting, setIsImporting] = useState(false);
+  const diagramExportRef = useRef<HTMLDivElement | null>(null);
+  const [isCopyingImage, setIsCopyingImage] = useState(false);
 
   const persistedNodePositionsRef = useRef<NodePositionMap>(
     getStoredJson(STORAGE_KEYS.nodePositions, {}),
@@ -229,6 +248,57 @@ function ERDBoardInner() {
       sqlDialect === "postgres" ? "postgres.sql" : `${sqlDialect}.sql`;
 
     downloadTextFile(sqlPreview, `schema.${extension}`);
+  };
+
+  const copyDiagramImage = async () => {
+    const target = diagramExportRef.current;
+
+    if (!target || isCopyingImage) return;
+
+    if (
+      typeof window === "undefined" ||
+      typeof navigator === "undefined" ||
+      typeof ClipboardItem === "undefined" ||
+      !navigator.clipboard?.write
+    ) {
+      window.alert("Tu navegador no soporta copiar imágenes al portapapeles.");
+      return;
+    }
+
+    setIsCopyingImage(true);
+
+    try {
+      const blob = await toBlob(target, {
+        cacheBust: true,
+        pixelRatio: 2,
+        backgroundColor: "#020617",
+        filter: (node) => {
+          if (!(node instanceof HTMLElement)) return true;
+
+          // No copies UI auxiliar.
+          if (node.classList.contains("react-flow__minimap")) return false;
+          if (node.classList.contains("react-flow__controls")) return false;
+          if (node.classList.contains("react-flow__panel")) return false;
+
+          return true;
+        },
+      });
+
+      if (!blob) {
+        throw new Error("No se pudo generar la imagen.");
+      }
+
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          [blob.type]: blob,
+        }),
+      ]);
+    } catch (error) {
+      console.error(error);
+      window.alert("No pude copiar la imagen del diagrama.");
+    } finally {
+      setIsCopyingImage(false);
+    }
   };
 
   const schemaLinter = useMemo(
@@ -625,8 +695,12 @@ function ERDBoardInner() {
             Auto ordenar
           </button>
 
-          <button className="rounded-lg border border-blue-500 bg-blue-500/10 px-3 py-2 text-xs text-blue-400 transition hover:bg-blue-500/20">
-            Copiar Imagen
+          <button
+            onClick={copyDiagramImage}
+            disabled={isCopyingImage || nodes.length === 0}
+            className="rounded-lg border border-blue-500 bg-blue-500/10 px-3 py-2 text-xs text-blue-400 transition hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isCopyingImage ? "Copiando..." : "Copiar Imagen"}
           </button>
         </div>
 
@@ -714,7 +788,7 @@ function ERDBoardInner() {
       </div>
 
       <section className="h-full min-w-0 flex-1 bg-slate-950">
-        <div className="h-full w-full">
+        <div ref={diagramExportRef} className="h-full w-full bg-slate-950">
           <ReactFlow
             nodes={nodes}
             edges={edges}
