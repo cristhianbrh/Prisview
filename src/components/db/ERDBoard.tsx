@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Background,
   Controls,
@@ -8,54 +8,94 @@ import {
   type Edge,
   type Node,
 } from "@xyflow/react";
+import TableNode from "./TableNode";
+import { parseSchema } from "./parser";
 
-const initialNodes: Node[] = [
-  {
-    id: "users",
-    position: { x: 120, y: 120 },
-    data: { label: "Users" },
-    style: {
-      background: "#1e293b",
-      color: "#e2e8f0",
-      border: "1px solid #334155",
-      borderRadius: "16px",
-      padding: "12px 16px",
-      minWidth: 180,
-    },
-  },
-  {
-    id: "posts",
-    position: { x: 420, y: 260 },
-    data: { label: "Posts" },
-    style: {
-      background: "#1e293b",
-      color: "#e2e8f0",
-      border: "1px solid #334155",
-      borderRadius: "16px",
-      padding: "12px 16px",
-      minWidth: 180,
-    },
-  },
-];
+const initialText = `User id int, name string, email string
+Post id int, title string, userId int
+Comment id int, body string, postId int, userId int`;
 
-const initialEdges: Edge[] = [
-  {
-    id: "users-posts",
-    source: "users",
-    target: "posts",
-    animated: false,
-    style: {
-      stroke: "#3b82f6",
-      strokeWidth: 1.5,
+const nodeTypes = {
+  tableNode: TableNode,
+};
+
+function buildNodesFromText(text: string): Node[] {
+  const tables = parseSchema(text);
+
+  return tables.map((table, index) => ({
+    id: table.name,
+    type: "tableNode",
+    position: {
+      x: 80 + (index % 3) * 320,
+      y: 80 + Math.floor(index / 3) * 260,
     },
-  },
-];
+    data: {
+      label: table.name,
+      fields: table.fields,
+    },
+    draggable: true,
+  }));
+}
+
+function buildEdgesFromText(text: string): Edge[] {
+  const tables = parseSchema(text);
+  const edges: Edge[] = [];
+
+  tables.forEach((table) => {
+    table.fields.forEach((field) => {
+      const fieldName = field.name.toLowerCase();
+
+      if (!fieldName.endsWith("id") || fieldName === "id") {
+        return;
+      }
+
+      const guessedTarget = field.name.replace(/Id$/i, "").toLowerCase();
+      const targetTable = tables.find(
+        (candidate) => candidate.name.toLowerCase() === guessedTarget,
+      );
+
+      if (!targetTable) {
+        return;
+      }
+
+      edges.push({
+        id: `${table.name}-${field.name}-${targetTable.name}`,
+        source: table.name,
+        target: targetTable.name,
+        animated: false,
+        style: { stroke: "#3b82f6", strokeWidth: 1.5 },
+      });
+    });
+  });
+
+  return edges;
+}
 
 function ERDBoardInner() {
-  const [schemaText, setSchemaText] = useState(
-    `User id int, name string, email string
-Post id int, title string, userId int`,
+  const [schemaText, setSchemaText] = useState(initialText);
+  const [debouncedText, setDebouncedText] = useState(initialText);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedText(schemaText);
+    }, 250);
+
+    return () => window.clearTimeout(timer);
+  }, [schemaText]);
+
+  const nodes = useMemo(
+    () => buildNodesFromText(debouncedText),
+    [debouncedText],
   );
+  const edges = useMemo(
+    () => buildEdgesFromText(debouncedText),
+    [debouncedText],
+  );
+
+  const clearAll = () => {
+    setSchemaText("");
+    setDebouncedText("");
+  };
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-slate-950 text-slate-100">
@@ -65,7 +105,7 @@ Post id int, title string, userId int`,
             Schema Editor
           </h1>
           <p className="mt-1 text-xs text-slate-400">
-            Sintaxis inicial: Tabla campo tipo, campo tipo
+            Sintaxis: Tabla campo tipo, campo tipo
           </p>
         </div>
 
@@ -73,9 +113,14 @@ Post id int, title string, userId int`,
           <button className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-blue-500 hover:text-blue-400">
             Exportar SQL
           </button>
-          <button className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-blue-500 hover:text-blue-400">
+
+          <button
+            onClick={clearAll}
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-blue-500 hover:text-blue-400"
+          >
             Limpiar
           </button>
+
           <button className="rounded-lg border border-blue-500 bg-blue-500/10 px-3 py-2 text-xs text-blue-400 transition hover:bg-blue-500/20">
             Copiar Imagen
           </button>
@@ -95,8 +140,9 @@ Post id int, title string, userId int`,
       <section className="h-full flex-1 bg-slate-950">
         <div className="h-full w-full">
           <ReactFlow
-            nodes={initialNodes}
-            edges={initialEdges}
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
             fitView
             proOptions={{ hideAttribution: true }}
           >
