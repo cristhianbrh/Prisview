@@ -1,4 +1,4 @@
-import type { Field, TableSchema } from "./types";
+import type { Field, TableSchema, SchemaValidationResult } from "./types";
 
 function parseDefaultValue(raw: string): string | number | boolean | null {
   const value = raw.trim();
@@ -140,4 +140,129 @@ export function parseSchema(input: string): TableSchema[] {
   if (currentTable) tables.push(currentTable);
 
   return tables;
+}
+
+export function validateSchema(
+  tables: TableSchema[],
+  sourceText?: string,
+): SchemaValidationResult {
+  const errors: SchemaValidationResult["errors"] = [];
+
+  const tableMap = new Map<string, TableSchema>();
+  const tableLineMap = new Map<string, number>();
+  const fieldLineMap = new Map<string, number>();
+
+  if (sourceText) {
+    const lines = sourceText.split("\n");
+    let currentTable: string | null = null;
+
+    lines.forEach((rawLine, index) => {
+      const lineNumber = index + 1;
+      if (!rawLine.trim()) return;
+
+      const isFieldLine = /^\s+/.test(rawLine);
+
+      if (!isFieldLine) {
+        currentTable = rawLine.trim();
+        tableLineMap.set(currentTable, lineNumber);
+        return;
+      }
+
+      if (!currentTable) return;
+
+      const parts = rawLine.trim().split(/\s+/);
+      if (parts.length >= 1) {
+        fieldLineMap.set(`${currentTable}.${parts[0]}`, lineNumber);
+      }
+    });
+  }
+
+  for (const table of tables) {
+    if (tableMap.has(table.name)) {
+      errors.push({
+        table: table.name,
+        line: tableLineMap.get(table.name),
+        message: `La tabla "${table.name}" está duplicada.`,
+      });
+      continue;
+    }
+
+    tableMap.set(table.name, table);
+
+    const fieldNames = new Set<string>();
+    let primaryKeyCount = 0;
+
+    for (const field of table.fields) {
+      if (fieldNames.has(field.name)) {
+        errors.push({
+          table: table.name,
+          field: field.name,
+          line: fieldLineMap.get(`${table.name}.${field.name}`),
+          message: `El campo "${field.name}" está duplicado en la tabla "${table.name}".`,
+        });
+      } else {
+        fieldNames.add(field.name);
+      }
+
+      if (field.isPrimary) {
+        primaryKeyCount += 1;
+      }
+
+      if (
+        field.isAutoIncrement &&
+        !["int", "integer"].includes(field.type.toLowerCase())
+      ) {
+        errors.push({
+          table: table.name,
+          field: field.name,
+          line: fieldLineMap.get(`${table.name}.${field.name}`),
+          message: `El campo "${field.name}" usa autoincrement pero no es entero.`,
+        });
+      }
+    }
+
+    if (primaryKeyCount > 1) {
+      errors.push({
+        table: table.name,
+        line: tableLineMap.get(table.name),
+        message: `La tabla "${table.name}" tiene múltiples claves primarias y todavía no soportas clave compuesta.`,
+      });
+    }
+  }
+
+  for (const table of tables) {
+    for (const field of table.fields) {
+      if (!field.reference) continue;
+
+      const targetTable = tableMap.get(field.reference.table);
+
+      if (!targetTable) {
+        errors.push({
+          table: table.name,
+          field: field.name,
+          line: fieldLineMap.get(`${table.name}.${field.name}`),
+          message: `El campo "${field.name}" referencia la tabla inexistente "${field.reference.table}".`,
+        });
+        continue;
+      }
+
+      const targetFieldExists = targetTable.fields.some(
+        (candidate) => candidate.name === field.reference?.field,
+      );
+
+      if (!targetFieldExists) {
+        errors.push({
+          table: table.name,
+          field: field.name,
+          line: fieldLineMap.get(`${table.name}.${field.name}`),
+          message: `El campo "${field.name}" referencia "${field.reference.table}.${field.reference.field}", pero ese campo no existe.`,
+        });
+      }
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
 }

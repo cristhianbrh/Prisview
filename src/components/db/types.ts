@@ -34,6 +34,7 @@ export interface TableSchema {
 export interface SchemaValidationError {
   table?: string;
   field?: string;
+  line?: number;
   message: string;
 }
 

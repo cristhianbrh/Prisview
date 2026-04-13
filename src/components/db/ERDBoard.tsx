@@ -12,7 +12,7 @@ import {
   type Node,
 } from "@xyflow/react";
 import TableNode from "./TableNode";
-import { parseSchema } from "./parser";
+import { parseSchema, validateSchema } from "./parser";
 
 const initialText = `User
   id int pk
@@ -406,10 +406,15 @@ function ERDBoardInner() {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const [sqlDialect, setSqlDialect] = useState<SqlDialect>("postgres");
-  const [schemaText, setSchemaText] = useState(initialText);
   const [debouncedText, setDebouncedText] = useState(initialText);
+  const [showSqlPreview, setShowSqlPreview] = useState(false);
+  const [schemaText, setSchemaText] = useState(initialText);
   const [leftPanelWidth, setLeftPanelWidth] = useState(50);
   const [isResizing, setIsResizing] = useState(false);
+  const [sqlPreview, setSqlPreview] = useState("");
+  const [schemaErrors, setSchemaErrors] = useState<
+    Array<{ line?: number; message: string }>
+  >([]);
 
   const initialGraphRef = useRef(buildInitialGraph(initialText));
 
@@ -420,12 +425,36 @@ function ERDBoardInner() {
     initialGraphRef.current.edges,
   );
 
-  const exportSQL = async () => {
-    const sql = generateSQLFromText(schemaText, sqlDialect);
+  const downloadSQL = () => {
+    if (!sqlPreview) return;
+
     const extension =
       sqlDialect === "postgres" ? "postgres.sql" : `${sqlDialect}.sql`;
 
-    downloadTextFile(sql, `schema.${extension}`);
+    downloadTextFile(sqlPreview, `schema.${extension}`);
+  };
+
+  const exportSQL = async () => {
+    const tables = parseSchema(schemaText);
+    const validation = validateSchema(tables, schemaText);
+
+    if (!validation.valid) {
+      setSchemaErrors(
+        validation.errors.map((error) => ({
+          line: error.line,
+          message: error.message,
+        })),
+      );
+      setSqlPreview("");
+      setShowSqlPreview(false);
+      return;
+    }
+
+    setSchemaErrors([]);
+
+    const sql = generateSQLFromText(schemaText, sqlDialect);
+    setSqlPreview(sql);
+    setShowSqlPreview(true);
   };
 
   useEffect(() => {
@@ -449,6 +478,20 @@ function ERDBoardInner() {
       return mergedNodes;
     });
   }, [debouncedText, setNodes, setEdges]);
+
+  useEffect(() => {
+    if (!showSqlPreview) return;
+
+    const tables = parseSchema(schemaText);
+    const validation = validateSchema(tables);
+
+    if (!validation.valid) {
+      setSqlPreview("");
+      return;
+    }
+
+    setSqlPreview(generateSQLFromText(schemaText, sqlDialect));
+  }, [schemaText, sqlDialect, showSqlPreview]);
 
   useEffect(() => {
     if (!isResizing) return;
@@ -593,6 +636,14 @@ function ERDBoardInner() {
     });
   };
 
+  const errorLines = new Set(
+    schemaErrors
+      .map((error) => error.line)
+      .filter((line): line is number => typeof line === "number"),
+  );
+
+  const editorLines = schemaText.split("\n");
+
   return (
     <div
       ref={containerRef}
@@ -613,22 +664,26 @@ function ERDBoardInner() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 px-4 py-3">
-          <button
-            onClick={exportSQL}
-            className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-blue-500 hover:text-blue-400"
-          >
-            Descargar
+          <div className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-blue-500">
+            <button
+              onClick={exportSQL}
+              className="text-slate-200 hover:text-blue-400"
+            >
+              Ver SQL
+            </button>
+
+            <span className="text-slate-500">|</span>
+
             <select
               value={sqlDialect}
               onChange={(e) => setSqlDialect(e.target.value as SqlDialect)}
-              onClick={(e) => e.stopPropagation()}
               className="bg-transparent text-blue-400 outline-none"
             >
               <option value="postgres">PostgreSQL</option>
               <option value="mysql">MySQL</option>
               <option value="sqlite">SQLite</option>
             </select>
-          </button>
+          </div>
 
           <button
             onClick={clearAll}
@@ -648,20 +703,90 @@ function ERDBoardInner() {
             Copiar Imagen
           </button>
         </div>
+        {schemaErrors.length > 0 ? (
+          <div className="border-b border-red-900/40 bg-red-950/40 px-4 py-3">
+            <p className="mb-2 text-xs font-medium text-red-300">
+              Corrige estos errores antes de exportar:
+            </p>
+            <ul className="space-y-1 text-xs text-red-200">
+              {schemaErrors.map((error, index) => (
+                <li key={`${error.message}-${index}`}>
+                  • {error.line ? `Línea ${error.line}: ` : ""}
+                  {error.message}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {showSqlPreview && sqlPreview ? (
+          <div className="border-b border-slate-800 bg-slate-950/80">
+            <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
+              <div>
+                <h2 className="text-xs font-medium text-slate-200">
+                  Preview SQL
+                </h2>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  Dialecto: {sqlDialect}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={downloadSQL}
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-blue-500 hover:text-blue-400"
+                >
+                  Descargar .sql
+                </button>
+
+                <button
+                  onClick={() => setShowSqlPreview(false)}
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-red-500 hover:text-red-400"
+                >
+                  Cerrar
+                </button>
+              </div>
+            </div>
+
+            <div className="max-h-72 overflow-auto p-4">
+              <pre className="whitespace-pre-wrap rounded-2xl border border-slate-800 bg-slate-950 p-4 text-xs leading-6 text-slate-200">
+                <code>{sqlPreview}</code>
+              </pre>
+            </div>
+          </div>
+        ) : null}
 
         <div className="flex-1 p-4">
-          <textarea
-            ref={textareaRef}
-            value={schemaText}
-            onChange={(e) => setSchemaText(e.target.value)}
-            onKeyDown={handleTextareaKeyDown}
-            spellCheck={false}
-            className="h-full w-full resize-none rounded-2xl border border-slate-800 bg-slate-950 p-4 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 focus:border-blue-500"
-            placeholder={`User
+          <div className="flex h-full overflow-hidden rounded-2xl border border-slate-800 bg-slate-950">
+            <div className="overflow-hidden border-r border-slate-800 bg-slate-900/60 px-2 py-4 text-right text-xs leading-6 text-slate-500">
+              {editorLines.map((_, index) => {
+                const lineNumber = index + 1;
+                const hasError = errorLines.has(lineNumber);
+
+                return (
+                  <div
+                    key={lineNumber}
+                    className={hasError ? "text-red-400" : ""}
+                  >
+                    {lineNumber}
+                  </div>
+                );
+              })}
+            </div>
+
+            <textarea
+              ref={textareaRef}
+              value={schemaText}
+              onChange={(e) => setSchemaText(e.target.value)}
+              onKeyDown={handleTextareaKeyDown}
+              spellCheck={false}
+              className="h-full w-full resize-none bg-slate-950 p-4 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 focus:border-blue-500"
+              placeholder={`User
   id int pk
   name string
   email string`}
-          />
+            />
+          </div>
         </div>
       </section>
 
