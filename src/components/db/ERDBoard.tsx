@@ -63,6 +63,12 @@ const STORAGE_KEYS = {
   leftPanelWidth: "erd-builder:leftPanelWidth",
 };
 
+type PersistedViewport = {
+  x: number;
+  y: number;
+  zoom: number;
+};
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
@@ -90,7 +96,10 @@ function getInitialDialect(): SqlDialect {
 
 function ERDBoardInner() {
   const containerRef = useRef<HTMLDivElement | null>(null);
+
   const hasRestoredPanelWidthRef = useRef(false);
+  const hasRestoredViewportRef = useRef(false);
+  const isReactFlowReadyRef = useRef(false);
 
   const [schemaText, setSchemaText] = useState(() =>
     getStoredString(STORAGE_KEYS.schemaText, initialText),
@@ -110,7 +119,6 @@ function ERDBoardInner() {
     Array<{ line?: number; message: string }>
   >([]);
 
-  // Arranca con valor seguro. La restauración real se hace explícitamente al montar.
   const [leftPanelWidth, setLeftPanelWidth] = useState(50);
 
   const persistedNodePositionsRef = useRef<NodePositionMap>(
@@ -136,27 +144,36 @@ function ERDBoardInner() {
     [debouncedText],
   );
 
-  const handleMoveEnd = () => {
+  const persistViewport = () => {
+    if (!isReactFlowReadyRef.current) return;
+    if (!hasRestoredViewportRef.current) return;
+
     setStoredValue(STORAGE_KEYS.viewport, JSON.stringify(getViewport()));
   };
 
-  const handleInit = () => {
-    const viewport = getStoredJson<{
-      x: number;
-      y: number;
-      zoom: number;
-    } | null>(STORAGE_KEYS.viewport, null);
+  const handleMoveEnd = () => {
+    persistViewport();
+  };
 
-    if (viewport) {
-      setViewport(viewport);
+  const handleInit = () => {
+    isReactFlowReadyRef.current = true;
+
+    const storedViewport = getStoredJson<PersistedViewport | null>(
+      STORAGE_KEYS.viewport,
+      null,
+    );
+
+    if (storedViewport) {
+      setViewport(storedViewport);
     }
+
+    hasRestoredViewportRef.current = true;
   };
 
   useEffect(() => {
     nodesRef.current = nodes;
   }, [nodes]);
 
-  // Restauración explícita del ancho del panel al montar.
   useEffect(() => {
     const storedWidth = getStoredNumberInRange(
       STORAGE_KEYS.leftPanelWidth,
@@ -169,7 +186,6 @@ function ERDBoardInner() {
     hasRestoredPanelWidthRef.current = true;
   }, []);
 
-  // No persistir hasta haber restaurado.
   useEffect(() => {
     if (!hasRestoredPanelWidthRef.current) return;
     setStoredValue(STORAGE_KEYS.leftPanelWidth, String(leftPanelWidth));
@@ -382,6 +398,9 @@ function ERDBoardInner() {
   }, [schemaAnalysis, sqlDialect, showSqlPreview]);
 
   const clearAll = () => {
+    hasRestoredPanelWidthRef.current = true;
+    hasRestoredViewportRef.current = true;
+
     setSchemaText("");
     setDebouncedText("");
     setNodes([]);
