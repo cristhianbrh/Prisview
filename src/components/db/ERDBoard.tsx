@@ -1,23 +1,38 @@
-import dagre from "@dagrejs/dagre";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   Controls,
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
+  type NodeTypes,
   useEdgesState,
   useNodesState,
   useReactFlow,
-  type Edge,
-  type Node,
 } from "@xyflow/react";
-import TableNode from "./TableNode";
-import { parseSchema, validateSchema } from "./parser";
 import CodeMirror from "@uiw/react-codemirror";
-import { EditorView } from "@codemirror/view";
-import { linter, lintGutter } from "@codemirror/lint";
 import { autocompletion } from "@codemirror/autocomplete";
+import { linter, lintGutter } from "@codemirror/lint";
+import { EditorView } from "@codemirror/view";
+import TableNode from "./TableNode";
+import { schemaCompletionSource } from "./autocomplete";
+import {
+  buildInitialGraph,
+  buildRawEdges,
+  buildRawNodes,
+  getLayoutedElements,
+  mergeNodesPreservingPositions,
+  type NodePositionMap,
+} from "./graph";
+import { parseSchema, validateSchema } from "./parser";
+import { generateSQLFromText, type SqlDialect } from "./sql";
+import {
+  getStoredJson,
+  getStoredNumberInRange,
+  getStoredString,
+  removeStoredValues,
+  setStoredValue,
+} from "./storage";
 
 const initialText = `User
   id int pk
@@ -35,8 +50,8 @@ Comment
   postId int ref Post.id
   userId int ref User.id`;
 
-const nodeTypes = {
-  tableNode: TableNode,
+const nodeTypes: NodeTypes = {
+  tableNode: TableNode as NodeTypes[string],
 };
 
 const STORAGE_KEYS = {
@@ -47,505 +62,8 @@ const STORAGE_KEYS = {
   leftPanelWidth: "erd-builder:leftPanelWidth",
 };
 
-const NODE_WIDTH = 280;
-const NODE_HEIGHT = 180;
-const GRID_X = 340;
-const GRID_Y = 240;
-const START_X = 80;
-const START_Y = 80;
-
-function buildRawNodes(text: string): Node[] {
-  const tables = parseSchema(text);
-
-  return tables.map((table) => ({
-    id: table.name,
-    type: "tableNode",
-    position: { x: 0, y: 0 },
-    data: {
-      label: table.name,
-      fields: table.fields,
-    },
-    draggable: true,
-    sourcePosition: "right",
-    targetPosition: "left",
-  }));
-}
-
-function buildRawEdges(text: string, positionedNodes: Node[]): Edge[] {
-  const tables = parseSchema(text);
-  const edges: Edge[] = [];
-
-  const nodeMap = new Map(positionedNodes.map((node) => [node.id, node]));
-
-  tables.forEach((table) => {
-    table.fields.forEach((field) => {
-      if (!field.reference) return;
-
-      const targetTable = tables.find(
-        (candidate) => candidate.name === field.reference?.table,
-      );
-
-      if (!targetTable) return;
-
-      const sourceNode = nodeMap.get(table.name);
-      const targetNode = nodeMap.get(targetTable.name);
-
-      if (!sourceNode || !targetNode) return;
-
-      const sourceCenterX = sourceNode.position.x + NODE_WIDTH / 2;
-      const targetCenterX = targetNode.position.x + NODE_WIDTH / 2;
-
-      const sourceIsLeftOfTarget = sourceCenterX < targetCenterX;
-
-      edges.push({
-        id: `${table.name}-${field.name}-${field.reference.table}-${field.reference.field}`,
-        source: table.name,
-        target: targetTable.name,
-        sourceHandle: sourceIsLeftOfTarget
-          ? `source-right-${field.name}`
-          : `source-left-${field.name}`,
-        targetHandle: sourceIsLeftOfTarget
-          ? `target-left-${field.reference.field}`
-          : `target-right-${field.reference.field}`,
-        // type: "smoothstep",
-        type: "bezier",
-        style: {
-          stroke: "#3b82f6",
-          strokeWidth: 1.5,
-        },
-        markerEnd: {
-          type: "arrowclosed",
-          width: 18,
-          height: 18,
-          color: "#3b82f6",
-        },
-      });
-    });
-  });
-
-  return edges;
-}
-
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
-}
-
-function rectsOverlap(
-  a: { x: number; y: number; width: number; height: number },
-  b: { x: number; y: number; width: number; height: number },
-  padding = 32,
-) {
-  return !(
-    a.x + a.width + padding <= b.x ||
-    b.x + b.width + padding <= a.x ||
-    a.y + a.height + padding <= b.y ||
-    b.y + b.height + padding <= a.y
-  );
-}
-
-function findFreePosition(existingNodes: Node[]) {
-  const occupied = existingNodes.map((node) => ({
-    x: node.position.x,
-    y: node.position.y,
-    width: NODE_WIDTH,
-    height: NODE_HEIGHT,
-  }));
-
-  for (let row = 0; row < 100; row += 1) {
-    for (let col = 0; col < 100; col += 1) {
-      const candidate = {
-        x: START_X + col * GRID_X,
-        y: START_Y + row * GRID_Y,
-        width: NODE_WIDTH,
-        height: NODE_HEIGHT,
-      };
-
-      const collides = occupied.some((box) => rectsOverlap(candidate, box));
-
-      if (!collides) {
-        return { x: candidate.x, y: candidate.y };
-      }
-    }
-  }
-
-  return {
-    x: START_X,
-    y: START_Y,
-  };
-}
-
-function applyPersistedNodePositions(nodes: Node[]): Node[] {
-  if (typeof window === "undefined") return nodes;
-
-  const raw = localStorage.getItem(STORAGE_KEYS.nodePositions);
-  if (!raw) return nodes;
-
-  try {
-    const saved = JSON.parse(raw) as Record<string, { x: number; y: number }>;
-
-    return nodes.map((node) => {
-      const persistedPosition = saved[node.id];
-      if (!persistedPosition) return node;
-
-      return {
-        ...node,
-        position: persistedPosition,
-      };
-    });
-  } catch {
-    return nodes;
-  }
-}
-
-function mergeNodesPreservingPositions(
-  prevNodes: Node[],
-  nextRawNodes: Node[],
-): Node[] {
-  const prevMap = new Map(prevNodes.map((node) => [node.id, node]));
-  const merged: Node[] = [];
-
-  let persistedPositions: Record<string, { x: number; y: number }> = {};
-
-  if (typeof window !== "undefined") {
-    try {
-      persistedPositions = JSON.parse(
-        localStorage.getItem(STORAGE_KEYS.nodePositions) ?? "{}",
-      );
-    } catch {
-      persistedPositions = {};
-    }
-  }
-
-  for (const rawNode of nextRawNodes) {
-    const existing = prevMap.get(rawNode.id);
-
-    if (existing) {
-      merged.push({
-        ...rawNode,
-        position: existing.position,
-        selected: existing.selected,
-        dragging: false,
-      });
-      continue;
-    }
-
-    const persistedPosition = persistedPositions[rawNode.id];
-
-    if (persistedPosition) {
-      merged.push({
-        ...rawNode,
-        position: persistedPosition,
-      });
-      continue;
-    }
-
-    const position = findFreePosition(merged);
-
-    merged.push({
-      ...rawNode,
-      position,
-    });
-  }
-
-  return merged;
-}
-
-function getLayoutedElements(nodes: Node[], edges: Edge[]) {
-  const graph = new dagre.graphlib.Graph();
-
-  graph.setDefaultEdgeLabel(() => ({}));
-  graph.setGraph({
-    rankdir: "LR",
-    nodesep: 48,
-    ranksep: 96,
-    marginx: 24,
-    marginy: 24,
-  });
-
-  nodes.forEach((node) => {
-    graph.setNode(node.id, {
-      width: NODE_WIDTH,
-      height: NODE_HEIGHT,
-    });
-  });
-
-  edges.forEach((edge) => {
-    graph.setEdge(edge.source, edge.target);
-  });
-
-  dagre.layout(graph);
-
-  const layoutedNodes = nodes.map((node) => {
-    const positioned = graph.node(node.id);
-
-    return {
-      ...node,
-      position: {
-        x: positioned.x - NODE_WIDTH / 2,
-        y: positioned.y - NODE_HEIGHT / 2,
-      },
-    };
-  });
-
-  return {
-    nodes: layoutedNodes,
-    edges,
-  };
-}
-
-const staticSchemaKeywords = [
-  { label: "pk", type: "keyword" as const },
-  { label: "not null", type: "keyword" as const },
-  { label: "null", type: "keyword" as const },
-  { label: "unique", type: "keyword" as const },
-  { label: "default", type: "keyword" as const },
-  { label: "ref", type: "keyword" as const },
-  { label: "autoincrement", type: "keyword" as const },
-
-  { label: "int", type: "type" as const },
-  { label: "integer", type: "type" as const },
-  { label: "string", type: "type" as const },
-  { label: "text", type: "type" as const },
-  { label: "boolean", type: "type" as const },
-  { label: "bool", type: "type" as const },
-  { label: "date", type: "type" as const },
-  { label: "datetime", type: "type" as const },
-  { label: "float", type: "type" as const },
-  { label: "uuid", type: "type" as const },
-];
-
-function schemaCompletionSource(context: any) {
-  const word = context.matchBefore(/[A-Za-z_][\w.]*/);
-  const doc = context.state.doc.toString();
-  const tables = parseSchema(doc);
-
-  if (!word && !context.explicit) {
-    return null;
-  }
-
-  const from = word ? word.from : context.pos;
-  const text = word ? word.text : "";
-
-  const line = context.state.doc.lineAt(context.pos).text;
-  const beforeCursor = line.slice(
-    0,
-    context.pos - context.state.doc.lineAt(context.pos).from,
-  );
-
-  // Caso 1: después de "ref " sugerir tablas
-  if (/\bref\s+[A-Za-z_]*$/.test(beforeCursor)) {
-    return {
-      from,
-      options: tables.map((table) => ({
-        label: table.name,
-        type: "class",
-      })),
-    };
-  }
-
-  // Caso 2: escribiendo "Tabla." sugerir campos de esa tabla
-  const tableDotMatch = text.match(/^([A-Za-z_]\w*)\.$/);
-  if (tableDotMatch) {
-    const tableName = tableDotMatch[1];
-    const table = tables.find((t) => t.name === tableName);
-
-    if (!table) return null;
-
-    return {
-      from,
-      options: table.fields.map((field) => ({
-        label: `${tableName}.${field.name}`,
-        type: "property",
-      })),
-      validFor: /^[A-Za-z_][\w.]*$/,
-    };
-  }
-
-  // Caso 3: escribiendo "Tabla.id" filtrar campos de esa tabla
-  const tableFieldMatch = text.match(/^([A-Za-z_]\w*)\.([\w]*)$/);
-  if (tableFieldMatch) {
-    const tableName = tableFieldMatch[1];
-    const fieldPrefix = tableFieldMatch[2].toLowerCase();
-    const table = tables.find((t) => t.name === tableName);
-
-    if (!table) return null;
-
-    return {
-      from,
-      options: table.fields
-        .filter((field) => field.name.toLowerCase().startsWith(fieldPrefix))
-        .map((field) => ({
-          label: `${tableName}.${field.name}`,
-          type: "property",
-        })),
-      validFor: /^[A-Za-z_][\w.]*$/,
-    };
-  }
-
-  // Caso 4: sugerencias generales, incluyendo nombres de tablas
-  const tableOptions = tables.map((table) => ({
-    label: table.name,
-    type: "class" as const,
-  }));
-
-  return {
-    from,
-    options: [...staticSchemaKeywords, ...tableOptions],
-    validFor: /^[A-Za-z_]\w*$/,
-  };
-}
-
-function buildInitialGraph(text: string) {
-  const rawNodes = buildRawNodes(text);
-  const layoutedNodes = getLayoutedElements(rawNodes, []).nodes;
-  const hydratedNodes = applyPersistedNodePositions(layoutedNodes);
-  const rawEdges = buildRawEdges(text, hydratedNodes);
-
-  return {
-    nodes: hydratedNodes,
-    edges: rawEdges,
-  };
-}
-
-type SqlDialect = "postgres" | "mysql" | "sqlite";
-
-function mapFieldTypeToSQL(type: string, dialect: SqlDialect = "postgres") {
-  const normalized = type.toLowerCase();
-
-  switch (normalized) {
-    case "int":
-    case "integer":
-      return "INTEGER";
-    case "string":
-      return dialect === "mysql" ? "VARCHAR(255)" : "TEXT";
-    case "text":
-      return "TEXT";
-    case "boolean":
-    case "bool":
-      return dialect === "sqlite" ? "INTEGER" : "BOOLEAN";
-    case "date":
-      return "DATE";
-    case "datetime":
-      if (dialect === "mysql") return "DATETIME";
-      if (dialect === "sqlite") return "TEXT";
-      return "TIMESTAMP";
-    case "float":
-      return dialect === "postgres" ? "REAL" : "FLOAT";
-    case "uuid":
-      if (dialect === "mysql") return "CHAR(36)";
-      if (dialect === "sqlite") return "TEXT";
-      return "UUID";
-    default:
-      return type.toUpperCase();
-  }
-}
-
-function formatDefaultValue(
-  value: string | number | boolean | null | undefined,
-  dialect: SqlDialect = "postgres",
-) {
-  if (value === undefined) return null;
-  if (value === null) return "NULL";
-  if (typeof value === "number") return String(value);
-
-  if (typeof value === "boolean") {
-    if (dialect === "sqlite") return value ? "1" : "0";
-    return value ? "TRUE" : "FALSE";
-  }
-
-  const raw = String(value).trim();
-
-  if (raw.toLowerCase() === "now") {
-    if (dialect === "sqlite") return "CURRENT_TIMESTAMP";
-    return "CURRENT_TIMESTAMP";
-  }
-
-  if (raw.toLowerCase() === "true") {
-    return dialect === "sqlite" ? "1" : "TRUE";
-  }
-
-  if (raw.toLowerCase() === "false") {
-    return dialect === "sqlite" ? "0" : "FALSE";
-  }
-
-  if (raw.toLowerCase() === "uuid_generate_v4()") {
-    return dialect === "postgres" ? raw : `'${raw}'`;
-  }
-
-  return `'${raw.replace(/'/g, "''")}'`;
-}
-
-function quoteIdentifier(name: string, dialect: SqlDialect = "postgres") {
-  if (dialect === "mysql") return `\`${name}\``;
-  return `"${name}"`;
-}
-
-function generateSQLFromText(text: string, dialect: SqlDialect = "postgres") {
-  const tables = parseSchema(text);
-
-  return tables
-    .map((table) => {
-      const lines: string[] = [];
-
-      for (const field of table.fields) {
-        const columnName = quoteIdentifier(field.name, dialect);
-
-        const isSQLiteAutoPk =
-          dialect === "sqlite" &&
-          field.isPrimary &&
-          field.isAutoIncrement &&
-          ["int", "integer"].includes(field.type.toLowerCase());
-
-        let sqlType = mapFieldTypeToSQL(field.type, dialect);
-
-        if (field.isAutoIncrement) {
-          if (dialect === "postgres") {
-            sqlType = "SERIAL";
-          } else if (dialect === "mysql") {
-            sqlType = "INT";
-          } else if (isSQLiteAutoPk) {
-            sqlType = "INTEGER";
-          }
-        }
-
-        if (isSQLiteAutoPk) {
-          lines.push(`  ${columnName} INTEGER PRIMARY KEY AUTOINCREMENT`);
-          continue;
-        }
-
-        const parts = [`  ${columnName}`, sqlType];
-
-        if (field.isPrimary) parts.push("PRIMARY KEY");
-        if (field.isUnique && !field.isPrimary) parts.push("UNIQUE");
-        if (field.isNullable === false) parts.push("NOT NULL");
-        if (field.isNullable === true && !field.isPrimary) parts.push("NULL");
-
-        if (field.isAutoIncrement && dialect === "mysql") {
-          parts.push("AUTO_INCREMENT");
-        }
-
-        const formattedDefault = formatDefaultValue(
-          field.defaultValue,
-          dialect,
-        );
-        if (formattedDefault !== null && !field.isAutoIncrement) {
-          parts.push(`DEFAULT ${formattedDefault}`);
-        }
-
-        lines.push(parts.join(" "));
-      }
-
-      for (const field of table.fields) {
-        if (!field.reference) continue;
-
-        lines.push(
-          `  FOREIGN KEY (${quoteIdentifier(field.name, dialect)}) REFERENCES ${quoteIdentifier(field.reference.table, dialect)}(${quoteIdentifier(field.reference.field, dialect)})`,
-        );
-      }
-
-      return `CREATE TABLE ${quoteIdentifier(table.name, dialect)} (\n${lines.join(",\n")}\n);`;
-    })
-    .join("\n\n");
 }
 
 function downloadTextFile(content: string, filename: string) {
@@ -562,26 +80,25 @@ function downloadTextFile(content: string, filename: string) {
   URL.revokeObjectURL(url);
 }
 
+function getInitialDialect(): SqlDialect {
+  const saved = getStoredString(STORAGE_KEYS.sqlDialect, "postgres");
+  return saved === "postgres" || saved === "mysql" || saved === "sqlite"
+    ? saved
+    : "postgres";
+}
+
 function ERDBoardInner() {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
-  const [schemaText, setSchemaText] = useState(() => {
-    if (typeof window === "undefined") return initialText;
-    return localStorage.getItem(STORAGE_KEYS.schemaText) ?? initialText;
-  });
+  const [schemaText, setSchemaText] = useState(() =>
+    getStoredString(STORAGE_KEYS.schemaText, initialText),
+  );
 
-  const [debouncedText, setDebouncedText] = useState(() => {
-    if (typeof window === "undefined") return initialText;
-    return localStorage.getItem(STORAGE_KEYS.schemaText) ?? initialText;
-  });
+  const [debouncedText, setDebouncedText] = useState(() =>
+    getStoredString(STORAGE_KEYS.schemaText, initialText),
+  );
 
-  const [sqlDialect, setSqlDialect] = useState<SqlDialect>(() => {
-    if (typeof window === "undefined") return "postgres";
-    const saved = localStorage.getItem(STORAGE_KEYS.sqlDialect);
-    return saved === "mysql" || saved === "sqlite" || saved === "postgres"
-      ? saved
-      : "postgres";
-  });
+  const [sqlDialect, setSqlDialect] = useState<SqlDialect>(getInitialDialect);
 
   const { setViewport, getViewport } = useReactFlow();
 
@@ -592,16 +109,17 @@ function ERDBoardInner() {
     Array<{ line?: number; message: string }>
   >([]);
 
-  const [leftPanelWidth, setLeftPanelWidth] = useState(50);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(() =>
+    getStoredNumberInRange(STORAGE_KEYS.leftPanelWidth, 50, 25, 75),
+  );
 
-  useEffect(() => {
-    const saved = Number(localStorage.getItem(STORAGE_KEYS.leftPanelWidth));
-    if (Number.isFinite(saved) && saved >= 25 && saved <= 75) {
-      setLeftPanelWidth(saved);
-    }
-  }, []);
+  const persistedNodePositionsRef = useRef<NodePositionMap>(
+    getStoredJson(STORAGE_KEYS.nodePositions, {}),
+  );
 
-  const initialGraphRef = useRef(buildInitialGraph(schemaText));
+  const initialGraphRef = useRef(
+    buildInitialGraph(schemaText, persistedNodePositionsRef.current),
+  );
 
   const [nodes, setNodes, onNodesChange] = useNodesState(
     initialGraphRef.current.nodes,
@@ -611,47 +129,29 @@ function ERDBoardInner() {
   );
 
   const handleMoveEnd = () => {
-    const viewport = getViewport();
-    localStorage.setItem(STORAGE_KEYS.viewport, JSON.stringify(viewport));
+    setStoredValue(STORAGE_KEYS.viewport, JSON.stringify(getViewport()));
   };
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.leftPanelWidth, String(leftPanelWidth));
-  }, [leftPanelWidth]);
-
-  //   useEffect(() => {
-  //     const raw = localStorage.getItem(STORAGE_KEYS.viewport);
-  //     if (!raw) return;
-
-  //     try {
-  //       const parsed = JSON.parse(raw) as { x: number; y: number; zoom: number };
-
-  //       requestAnimationFrame(() => {
-  //         setViewport(parsed);
-  //       });
-  //     } catch {
-  //       // ignorar datos corruptos
-  //     }
-  //   }, [setViewport]);
-
   const handleInit = () => {
-    const raw = localStorage.getItem(STORAGE_KEYS.viewport);
-    if (!raw) return;
+    const viewport = getStoredJson<
+      { x: number; y: number; zoom: number } | null
+    >(STORAGE_KEYS.viewport, null);
 
-    try {
-      const parsed = JSON.parse(raw) as { x: number; y: number; zoom: number };
-      setViewport(parsed);
-    } catch {
-      // ignorar datos corruptos
+    if (viewport) {
+      setViewport(viewport);
     }
   };
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.schemaText, schemaText);
+    setStoredValue(STORAGE_KEYS.leftPanelWidth, String(leftPanelWidth));
+  }, [leftPanelWidth]);
+
+  useEffect(() => {
+    setStoredValue(STORAGE_KEYS.schemaText, schemaText);
   }, [schemaText]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.sqlDialect, sqlDialect);
+    setStoredValue(STORAGE_KEYS.sqlDialect, sqlDialect);
   }, [sqlDialect]);
 
   useEffect(() => {
@@ -665,7 +165,7 @@ function ERDBoardInner() {
       ]),
     );
 
-    localStorage.setItem(STORAGE_KEYS.nodePositions, JSON.stringify(positions));
+    setStoredValue(STORAGE_KEYS.nodePositions, JSON.stringify(positions));
   }, [nodes]);
 
   const downloadSQL = () => {
@@ -677,80 +177,86 @@ function ERDBoardInner() {
     downloadTextFile(sqlPreview, `schema.${extension}`);
   };
 
-  const schemaLinter = linter((view) => {
-    const text = view.state.doc.toString();
-    const tables = parseSchema(text);
-    const validation = validateSchema(tables, text);
+  const schemaLinter = useMemo(
+    () =>
+      linter((view) => {
+        const text = view.state.doc.toString();
+        const tables = parseSchema(text);
+        const validation = validateSchema(tables, text);
 
-    return validation.errors
-      .filter((error) => typeof error.line === "number")
-      .map((error) => {
-        const line = view.state.doc.line(error.line!);
+        return validation.errors
+          .filter((error) => typeof error.line === "number")
+          .map((error) => {
+            const line = view.state.doc.line(error.line!);
 
-        return {
-          from: line.from,
-          to: line.to,
-          severity: "error",
-          message: error.message,
-        };
-      });
-  });
+            return {
+              from: line.from,
+              to: line.to,
+              severity: "error" as const,
+              message: error.message,
+            };
+          });
+      }),
+    [],
+  );
 
-  const schemaAutocomplete = autocompletion({
-    override: [schemaCompletionSource],
-  });
+  const schemaAutocomplete = useMemo(
+    () =>
+      autocompletion({
+        override: [schemaCompletionSource],
+      }),
+    [],
+  );
 
-  const editorExtensions = [
-    EditorView.lineWrapping,
-    lintGutter(),
-    schemaLinter,
-    schemaAutocomplete,
-    EditorView.theme({
-      "&": {
-        height: "100%",
-        minHeight: "0",
-        backgroundColor: "#020617",
-        color: "#e2e8f0",
-        fontSize: "14px",
-      },
-      ".cm-editor": {
-        height: "100%",
-        minHeight: "0",
-      },
-      ".cm-scroller": {
-        overflow: "auto",
-      },
-      //   ".cm-scroller": {
-      //     fontFamily:
-      //       'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-      //     lineHeight: "1.5rem",
-      //   },
-      ".cm-gutters": {
-        backgroundColor: "#0f172a",
-        color: "#64748b",
-        borderRight: "1px solid #1e293b",
-      },
-      ".cm-activeLineGutter": {
-        backgroundColor: "transparent",
-        color: "#94a3b8",
-      },
-      ".cm-content": {
-        padding: "16px",
-        minHeight: "100%",
-      },
-      "&.cm-focused": {
-        outline: "none",
-      },
-      ".cm-line": {
-        padding: 0,
-      },
-      ".cm-diagnostic": {
-        fontSize: "12px",
-      },
-    }),
-  ];
+  const editorExtensions = useMemo(
+    () => [
+      EditorView.lineWrapping,
+      lintGutter(),
+      schemaLinter,
+      schemaAutocomplete,
+      EditorView.theme({
+        "&": {
+          height: "100%",
+          minHeight: "0",
+          backgroundColor: "#020617",
+          color: "#e2e8f0",
+          fontSize: "14px",
+        },
+        ".cm-editor": {
+          height: "100%",
+          minHeight: "0",
+        },
+        ".cm-scroller": {
+          overflow: "auto",
+        },
+        ".cm-gutters": {
+          backgroundColor: "#0f172a",
+          color: "#64748b",
+          borderRight: "1px solid #1e293b",
+        },
+        ".cm-activeLineGutter": {
+          backgroundColor: "transparent",
+          color: "#94a3b8",
+        },
+        ".cm-content": {
+          padding: "16px",
+          minHeight: "100%",
+        },
+        "&.cm-focused": {
+          outline: "none",
+        },
+        ".cm-line": {
+          padding: 0,
+        },
+        ".cm-diagnostic": {
+          fontSize: "12px",
+        },
+      }),
+    ],
+    [schemaAutocomplete, schemaLinter],
+  );
 
-  const exportSQL = async () => {
+  const exportSQL = () => {
     const tables = parseSchema(schemaText);
     const validation = validateSchema(tables, schemaText);
 
@@ -767,9 +273,7 @@ function ERDBoardInner() {
     }
 
     setSchemaErrors([]);
-
-    const sql = generateSQLFromText(schemaText, sqlDialect);
-    setSqlPreview(sql);
+    setSqlPreview(generateSQLFromText(schemaText, sqlDialect));
     setShowSqlPreview(true);
   };
 
@@ -785,12 +289,18 @@ function ERDBoardInner() {
     const nextRawNodes = buildRawNodes(debouncedText);
 
     setNodes((prevNodes) => {
+      const persistedPositions = getStoredJson<NodePositionMap>(
+        STORAGE_KEYS.nodePositions,
+        {},
+      );
+
       const mergedNodes = mergeNodesPreservingPositions(
         prevNodes,
         nextRawNodes,
+        persistedPositions,
       );
-      const nextEdges = buildRawEdges(debouncedText, mergedNodes);
-      setEdges(nextEdges);
+
+      setEdges(buildRawEdges(debouncedText, mergedNodes));
       return mergedNodes;
     });
   }, [debouncedText, setNodes, setEdges]);
@@ -854,18 +364,23 @@ function ERDBoardInner() {
     setSchemaErrors([]);
     setSqlPreview("");
     setShowSqlPreview(false);
+    setSqlDialect("postgres");
+    setLeftPanelWidth(50);
+    setViewport({ x: 0, y: 0, zoom: 1 });
 
-    localStorage.removeItem(STORAGE_KEYS.schemaText);
-    localStorage.removeItem(STORAGE_KEYS.nodePositions);
-    localStorage.removeItem(STORAGE_KEYS.viewport);
-    localStorage.removeItem(STORAGE_KEYS.leftPanelWidth);
+    removeStoredValues([
+      STORAGE_KEYS.schemaText,
+      STORAGE_KEYS.sqlDialect,
+      STORAGE_KEYS.nodePositions,
+      STORAGE_KEYS.viewport,
+      STORAGE_KEYS.leftPanelWidth,
+    ]);
   };
 
   const autoLayout = () => {
     setNodes((prevNodes) => {
       const layoutedNodes = getLayoutedElements(prevNodes, edges).nodes;
-      const nextEdges = buildRawEdges(debouncedText, layoutedNodes);
-      setEdges(nextEdges);
+      setEdges(buildRawEdges(debouncedText, layoutedNodes));
       return layoutedNodes;
     });
   };
@@ -888,7 +403,7 @@ function ERDBoardInner() {
             Schema Editor
           </h1>
           <p className="mt-1 text-xs text-slate-400">
-            Las tablas movidas conservan su posición. Las nuevas se colocan
+            Las tablas movidas conservan su posicion. Las nuevas se colocan
             solas.
           </p>
         </div>
@@ -933,6 +448,7 @@ function ERDBoardInner() {
             Copiar Imagen
           </button>
         </div>
+
         {schemaErrors.length > 0 ? (
           <div className="border-b border-red-900/40 bg-red-950/40 px-4 py-3">
             <p className="mb-2 text-xs font-medium text-red-300">
@@ -941,7 +457,7 @@ function ERDBoardInner() {
             <ul className="space-y-1 text-xs text-red-200">
               {schemaErrors.map((error, index) => (
                 <li key={`${error.message}-${index}`}>
-                  • {error.line ? `Línea ${error.line}: ` : ""}
+                  - {error.line ? `Linea ${error.line}: ` : ""}
                   {error.message}
                 </li>
               ))}
@@ -1029,8 +545,8 @@ function ERDBoardInner() {
             proOptions={{ hideAttribution: true }}
             onInit={handleInit}
           >
-            <MiniMap className="!bg-slate-900" pannable zoomable />
-            <Controls className="!border !border-slate-700 !bg-slate-900" />
+            <MiniMap className="bg-slate-900!" pannable zoomable />
+            <Controls className="border! border-slate-700! bg-slate-900!" />
             <Background gap={24} size={1} />
           </ReactFlow>
         </div>

@@ -2,11 +2,12 @@ import {
   Handle,
   Position,
   useUpdateNodeInternals,
+  type Node,
   type NodeProps,
 } from "@xyflow/react";
 import { useEffect } from "react";
 
-interface TableNodeData {
+interface TableNodeData extends Record<string, unknown> {
   label: string;
   fields: Array<{
     name: string;
@@ -19,7 +20,9 @@ interface TableNodeData {
   }>;
 }
 
-export default function TableNode({ id, data }: NodeProps<TableNodeData>) {
+type TableNodeType = Node<TableNodeData, "tableNode">;
+
+export default function TableNode({ id, data }: NodeProps<TableNodeType>) {
   const updateNodeInternals = useUpdateNodeInternals();
 
   useEffect(() => {
@@ -27,7 +30,7 @@ export default function TableNode({ id, data }: NodeProps<TableNodeData>) {
   }, [data.fields, id, updateNodeInternals]);
 
   return (
-    <div className="relative min-w-[260px] overflow-hidden rounded-2xl border border-slate-700 bg-slate-800 shadow-2xl">
+    <div className="relative min-w-65 overflow-hidden rounded-2xl border border-slate-700 bg-slate-800 shadow-2xl">
       <div className="border-b border-slate-700 bg-slate-900 px-4 py-3">
         <h3 className="text-sm font-semibold tracking-wide text-blue-400">
           {data.label}
@@ -44,7 +47,7 @@ export default function TableNode({ id, data }: NodeProps<TableNodeData>) {
               type="target"
               position={Position.Left}
               id={`target-left-${field.name}`}
-              className="!left-[-6px] !h-3 !w-3 !border-slate-200 !bg-slate-600"
+              className="-left-1.5! h-3! w-3! border-slate-200! bg-slate-600!"
               style={{ top: "50%", transform: "translateY(-50%)" }}
             />
 
@@ -52,7 +55,7 @@ export default function TableNode({ id, data }: NodeProps<TableNodeData>) {
               type="target"
               position={Position.Right}
               id={`target-right-${field.name}`}
-              className="!right-[-6px] !h-3 !w-3 !border-slate-200 !bg-slate-600"
+              className="-right-1.5! h-3! w-3! border-slate-200! bg-slate-600!"
               style={{ top: "50%", transform: "translateY(-50%)" }}
             />
 
@@ -62,7 +65,7 @@ export default function TableNode({ id, data }: NodeProps<TableNodeData>) {
                   type="source"
                   position={Position.Left}
                   id={`source-left-${field.name}`}
-                  className="!left-[-6px] !h-3 !w-3 !border-blue-300 !bg-blue-500"
+                  className="-left-1.5! h-3! w-3! border-blue-300! bg-blue-500!"
                   style={{ top: "50%", transform: "translateY(-50%)" }}
                 />
 
@@ -70,7 +73,7 @@ export default function TableNode({ id, data }: NodeProps<TableNodeData>) {
                   type="source"
                   position={Position.Right}
                   id={`source-right-${field.name}`}
-                  className="!right-[-6px] !h-3 !w-3 !border-blue-300 !bg-blue-500"
+                  className="-right-1.5! h-3! w-3! border-blue-300! bg-blue-500!"
                   style={{ top: "50%", transform: "translateY(-50%)" }}
                 />
               </>
