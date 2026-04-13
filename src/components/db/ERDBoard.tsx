@@ -1,10 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import dagre from "@dagrejs/dagre";
+import { useEffect, useRef, useState } from "react";
 import {
   Background,
   Controls,
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
+  useEdgesState,
+  useNodesState,
   type Edge,
   type Node,
 } from "@xyflow/react";
@@ -31,25 +34,31 @@ const nodeTypes = {
   tableNode: TableNode,
 };
 
-function buildNodesFromText(text: string): Node[] {
+const NODE_WIDTH = 280;
+const NODE_HEIGHT = 180;
+const GRID_X = 340;
+const GRID_Y = 240;
+const START_X = 80;
+const START_Y = 80;
+
+function buildRawNodes(text: string): Node[] {
   const tables = parseSchema(text);
 
-  return tables.map((table, index) => ({
+  return tables.map((table) => ({
     id: table.name,
     type: "tableNode",
-    position: {
-      x: 80 + (index % 3) * 340,
-      y: 80 + Math.floor(index / 3) * 280,
-    },
+    position: { x: 0, y: 0 },
     data: {
       label: table.name,
       fields: table.fields,
     },
     draggable: true,
+    sourcePosition: "right",
+    targetPosition: "left",
   }));
 }
 
-function buildEdgesFromText(text: string): Edge[] {
+function buildRawEdges(text: string): Edge[] {
   const tables = parseSchema(text);
   const edges: Edge[] = [];
 
@@ -67,14 +76,17 @@ function buildEdgesFromText(text: string): Edge[] {
         id: `${table.name}-${field.name}-${field.reference.table}-${field.reference.field}`,
         source: table.name,
         target: targetTable.name,
-        label: `${field.name} → ${field.reference.table}.${field.reference.field}`,
+        sourceHandle: undefined,
+        targetHandle: undefined,
         style: {
           stroke: "#3b82f6",
           strokeWidth: 1.5,
         },
-        labelStyle: {
-          fill: "#94a3b8",
-          fontSize: 10,
+        markerEnd: {
+          type: "arrowclosed",
+          width: 18,
+          height: 18,
+          color: "#3b82f6",
         },
       });
     });
@@ -87,6 +99,130 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
+function rectsOverlap(
+  a: { x: number; y: number; width: number; height: number },
+  b: { x: number; y: number; width: number; height: number },
+  padding = 32,
+) {
+  return !(
+    a.x + a.width + padding <= b.x ||
+    b.x + b.width + padding <= a.x ||
+    a.y + a.height + padding <= b.y ||
+    b.y + b.height + padding <= a.y
+  );
+}
+
+function findFreePosition(existingNodes: Node[]) {
+  const occupied = existingNodes.map((node) => ({
+    x: node.position.x,
+    y: node.position.y,
+    width: NODE_WIDTH,
+    height: NODE_HEIGHT,
+  }));
+
+  for (let row = 0; row < 100; row += 1) {
+    for (let col = 0; col < 100; col += 1) {
+      const candidate = {
+        x: START_X + col * GRID_X,
+        y: START_Y + row * GRID_Y,
+        width: NODE_WIDTH,
+        height: NODE_HEIGHT,
+      };
+
+      const collides = occupied.some((box) => rectsOverlap(candidate, box));
+
+      if (!collides) {
+        return { x: candidate.x, y: candidate.y };
+      }
+    }
+  }
+
+  return {
+    x: START_X,
+    y: START_Y,
+  };
+}
+
+function mergeNodesPreservingPositions(
+  prevNodes: Node[],
+  nextRawNodes: Node[],
+): Node[] {
+  const prevMap = new Map(prevNodes.map((node) => [node.id, node]));
+  const merged: Node[] = [];
+
+  for (const rawNode of nextRawNodes) {
+    const existing = prevMap.get(rawNode.id);
+
+    if (existing) {
+      merged.push({
+        ...rawNode,
+        position: existing.position,
+        selected: existing.selected,
+        dragging: false,
+      });
+      continue;
+    }
+
+    const position = findFreePosition(merged);
+
+    merged.push({
+      ...rawNode,
+      position,
+    });
+  }
+
+  return merged;
+}
+
+function getLayoutedElements(nodes: Node[], edges: Edge[]) {
+  const graph = new dagre.graphlib.Graph();
+
+  graph.setDefaultEdgeLabel(() => ({}));
+  graph.setGraph({
+    rankdir: "LR",
+    nodesep: 48,
+    ranksep: 96,
+    marginx: 24,
+    marginy: 24,
+  });
+
+  nodes.forEach((node) => {
+    graph.setNode(node.id, {
+      width: NODE_WIDTH,
+      height: NODE_HEIGHT,
+    });
+  });
+
+  edges.forEach((edge) => {
+    graph.setEdge(edge.source, edge.target);
+  });
+
+  dagre.layout(graph);
+
+  const layoutedNodes = nodes.map((node) => {
+    const positioned = graph.node(node.id);
+
+    return {
+      ...node,
+      position: {
+        x: positioned.x - NODE_WIDTH / 2,
+        y: positioned.y - NODE_HEIGHT / 2,
+      },
+    };
+  });
+
+  return {
+    nodes: layoutedNodes,
+    edges,
+  };
+}
+
+function buildInitialGraph(text: string) {
+  const rawNodes = buildRawNodes(text);
+  const rawEdges = buildRawEdges(text);
+  return getLayoutedElements(rawNodes, rawEdges);
+}
+
 function ERDBoardInner() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -96,6 +232,15 @@ function ERDBoardInner() {
   const [leftPanelWidth, setLeftPanelWidth] = useState(50);
   const [isResizing, setIsResizing] = useState(false);
 
+  const initialGraphRef = useRef(buildInitialGraph(initialText));
+
+  const [nodes, setNodes, onNodesChange] = useNodesState(
+    initialGraphRef.current.nodes,
+  );
+  const [edges, setEdges, onEdgesChange] = useEdgesState(
+    initialGraphRef.current.edges,
+  );
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setDebouncedText(schemaText);
@@ -103,6 +248,16 @@ function ERDBoardInner() {
 
     return () => window.clearTimeout(timer);
   }, [schemaText]);
+
+  useEffect(() => {
+    const nextRawNodes = buildRawNodes(debouncedText);
+    const nextEdges = buildRawEdges(debouncedText);
+
+    setNodes((prevNodes) =>
+      mergeNodesPreservingPositions(prevNodes, nextRawNodes),
+    );
+    setEdges(nextEdges);
+  }, [debouncedText, setNodes, setEdges]);
 
   useEffect(() => {
     if (!isResizing) return;
@@ -137,19 +292,16 @@ function ERDBoardInner() {
     };
   }, [isResizing]);
 
-  const nodes = useMemo(
-    () => buildNodesFromText(debouncedText),
-    [debouncedText],
-  );
-  const edges = useMemo(
-    () => buildEdgesFromText(debouncedText),
-    [debouncedText],
-  );
-
   const clearAll = () => {
     setSchemaText("");
     setDebouncedText("");
+    setNodes([]);
+    setEdges([]);
     textareaRef.current?.focus();
+  };
+
+  const autoLayout = () => {
+    setNodes((prevNodes) => getLayoutedElements(prevNodes, edges).nodes);
   };
 
   const handleResizeStart = () => {
@@ -175,17 +327,11 @@ function ERDBoardInner() {
       const selectedText = value.slice(lineStart, end);
       const lines = selectedText.split("\n");
 
-      const updatedLines = lines.map((line, index) => {
-        const isFirstLine = index === 0;
-        const effectiveLine = isFirstLine
-          ? value.slice(lineStart, lineStart + lines[0].length)
-          : line;
-
-        if (effectiveLine.startsWith(indent))
-          return effectiveLine.slice(indent.length);
-        if (effectiveLine.startsWith("\t")) return effectiveLine.slice(1);
-        if (effectiveLine.startsWith(" ")) return effectiveLine.slice(1);
-        return effectiveLine;
+      const updatedLines = lines.map((line) => {
+        if (line.startsWith(indent)) return line.slice(indent.length);
+        if (line.startsWith("\t")) return line.slice(1);
+        if (line.startsWith(" ")) return line.slice(1);
+        return line;
       });
 
       const replacement = updatedLines.join("\n");
@@ -196,7 +342,7 @@ function ERDBoardInner() {
       setSchemaText(nextValue);
 
       requestAnimationFrame(() => {
-        const firstLineRemoved = lines[0]?.startsWith(indent)
+        const removedFirst = lines[0]?.startsWith(indent)
           ? indent.length
           : lines[0]?.startsWith("\t")
             ? 1
@@ -211,7 +357,7 @@ function ERDBoardInner() {
           return acc;
         }, 0);
 
-        textarea.selectionStart = Math.max(lineStart, start - firstLineRemoved);
+        textarea.selectionStart = Math.max(lineStart, start - removedFirst);
         textarea.selectionEnd = Math.max(lineStart, end - removedTotal);
       });
 
@@ -261,11 +407,12 @@ function ERDBoardInner() {
             Schema Editor
           </h1>
           <p className="mt-1 text-xs text-slate-400">
-            Usa Tab para indentar y Shift+Tab para quitar indentación.
+            Las tablas movidas conservan su posición. Las nuevas se colocan
+            solas.
           </p>
         </div>
 
-        <div className="flex items-center gap-2 border-b border-slate-800 px-4 py-3">
+        <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 px-4 py-3">
           <button className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-blue-500 hover:text-blue-400">
             Exportar SQL
           </button>
@@ -275,6 +422,13 @@ function ERDBoardInner() {
             className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-blue-500 hover:text-blue-400"
           >
             Limpiar
+          </button>
+
+          <button
+            onClick={autoLayout}
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-blue-500 hover:text-blue-400"
+          >
+            Auto ordenar
           </button>
 
           <button className="rounded-lg border border-blue-500 bg-blue-500/10 px-3 py-2 text-xs text-blue-400 transition hover:bg-blue-500/20">
@@ -313,6 +467,8 @@ function ERDBoardInner() {
           <ReactFlow
             nodes={nodes}
             edges={edges}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
             nodeTypes={nodeTypes}
             fitView
             proOptions={{ hideAttribution: true }}
