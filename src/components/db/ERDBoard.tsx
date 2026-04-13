@@ -13,6 +13,9 @@ import {
 } from "@xyflow/react";
 import TableNode from "./TableNode";
 import { parseSchema, validateSchema } from "./parser";
+import CodeMirror from "@uiw/react-codemirror";
+import { EditorView } from "@codemirror/view";
+import { linter, lintGutter } from "@codemirror/lint";
 
 const initialText = `User
   id int pk
@@ -403,7 +406,6 @@ function downloadTextFile(content: string, filename: string) {
 
 function ERDBoardInner() {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const [sqlDialect, setSqlDialect] = useState<SqlDialect>("postgres");
   const [debouncedText, setDebouncedText] = useState(initialText);
@@ -433,6 +435,74 @@ function ERDBoardInner() {
 
     downloadTextFile(sqlPreview, `schema.${extension}`);
   };
+
+  const schemaLinter = linter((view) => {
+    const text = view.state.doc.toString();
+    const tables = parseSchema(text);
+    const validation = validateSchema(tables, text);
+
+    return validation.errors
+      .filter((error) => typeof error.line === "number")
+      .map((error) => {
+        const line = view.state.doc.line(error.line!);
+
+        return {
+          from: line.from,
+          to: line.to,
+          severity: "error",
+          message: error.message,
+        };
+      });
+  });
+
+  const editorExtensions = [
+    EditorView.lineWrapping,
+    lintGutter(),
+    schemaLinter,
+    EditorView.theme({
+      "&": {
+        height: "100%",
+        minHeight: "0",
+        backgroundColor: "#020617",
+        color: "#e2e8f0",
+        fontSize: "14px",
+      },
+      ".cm-editor": {
+        height: "100%",
+        minHeight: "0",
+      },
+      ".cm-scroller": {
+        overflow: "auto",
+      },
+    //   ".cm-scroller": {
+    //     fontFamily:
+    //       'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+    //     lineHeight: "1.5rem",
+    //   },
+      ".cm-gutters": {
+        backgroundColor: "#0f172a",
+        color: "#64748b",
+        borderRight: "1px solid #1e293b",
+      },
+      ".cm-activeLineGutter": {
+        backgroundColor: "transparent",
+        color: "#94a3b8",
+      },
+      ".cm-content": {
+        padding: "16px",
+        minHeight: "100%",
+      },
+      "&.cm-focused": {
+        outline: "none",
+      },
+      ".cm-line": {
+        padding: 0,
+      },
+      ".cm-diagnostic": {
+        fontSize: "12px",
+      },
+    }),
+  ];
 
   const exportSQL = async () => {
     const tables = parseSchema(schemaText);
@@ -483,7 +553,7 @@ function ERDBoardInner() {
     if (!showSqlPreview) return;
 
     const tables = parseSchema(schemaText);
-    const validation = validateSchema(tables);
+    const validation = validateSchema(tables, schemaText);
 
     if (!validation.valid) {
       setSqlPreview("");
@@ -535,7 +605,6 @@ function ERDBoardInner() {
     setDebouncedText("");
     setNodes([]);
     setEdges([]);
-    textareaRef.current?.focus();
   };
 
   const autoLayout = () => {
@@ -550,99 +619,6 @@ function ERDBoardInner() {
   const handleResizeStart = () => {
     setIsResizing(true);
   };
-
-  const handleTextareaKeyDown = (
-    event: React.KeyboardEvent<HTMLTextAreaElement>,
-  ) => {
-    const textarea = event.currentTarget;
-
-    if (event.key !== "Tab") return;
-
-    event.preventDefault();
-
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const value = textarea.value;
-    const indent = "  ";
-
-    if (event.shiftKey) {
-      const lineStart = value.lastIndexOf("\n", start - 1) + 1;
-      const selectedText = value.slice(lineStart, end);
-      const lines = selectedText.split("\n");
-
-      const updatedLines = lines.map((line) => {
-        if (line.startsWith(indent)) return line.slice(indent.length);
-        if (line.startsWith("\t")) return line.slice(1);
-        if (line.startsWith(" ")) return line.slice(1);
-        return line;
-      });
-
-      const replacement = updatedLines.join("\n");
-      const before = value.slice(0, lineStart);
-      const after = value.slice(end);
-      const nextValue = before + replacement + after;
-
-      setSchemaText(nextValue);
-
-      requestAnimationFrame(() => {
-        const removedFirst = lines[0]?.startsWith(indent)
-          ? indent.length
-          : lines[0]?.startsWith("\t")
-            ? 1
-            : lines[0]?.startsWith(" ")
-              ? 1
-              : 0;
-
-        const removedTotal = lines.reduce((acc, line) => {
-          if (line.startsWith(indent)) return acc + indent.length;
-          if (line.startsWith("\t")) return acc + 1;
-          if (line.startsWith(" ")) return acc + 1;
-          return acc;
-        }, 0);
-
-        textarea.selectionStart = Math.max(lineStart, start - removedFirst);
-        textarea.selectionEnd = Math.max(lineStart, end - removedTotal);
-      });
-
-      return;
-    }
-
-    if (start !== end && value.slice(start, end).includes("\n")) {
-      const lineStart = value.lastIndexOf("\n", start - 1) + 1;
-      const selectedText = value.slice(lineStart, end);
-      const lines = selectedText.split("\n");
-      const updatedLines = lines.map((line) => `${indent}${line}`);
-      const replacement = updatedLines.join("\n");
-
-      const before = value.slice(0, lineStart);
-      const after = value.slice(end);
-      const nextValue = before + replacement + after;
-
-      setSchemaText(nextValue);
-
-      requestAnimationFrame(() => {
-        textarea.selectionStart = start + indent.length;
-        textarea.selectionEnd = end + indent.length * lines.length;
-      });
-
-      return;
-    }
-
-    const nextValue = value.slice(0, start) + indent + value.slice(end);
-    setSchemaText(nextValue);
-
-    requestAnimationFrame(() => {
-      textarea.selectionStart = textarea.selectionEnd = start + indent.length;
-    });
-  };
-
-  const errorLines = new Set(
-    schemaErrors
-      .map((error) => error.line)
-      .filter((line): line is number => typeof line === "number"),
-  );
-
-  const editorLines = schemaText.split("\n");
 
   return (
     <div
@@ -756,35 +732,21 @@ function ERDBoardInner() {
           </div>
         ) : null}
 
-        <div className="flex-1 p-4">
-          <div className="flex h-full overflow-hidden rounded-2xl border border-slate-800 bg-slate-950">
-            <div className="overflow-hidden border-r border-slate-800 bg-slate-900/60 px-2 py-4 text-right text-xs leading-6 text-slate-500">
-              {editorLines.map((_, index) => {
-                const lineNumber = index + 1;
-                const hasError = errorLines.has(lineNumber);
-
-                return (
-                  <div
-                    key={lineNumber}
-                    className={hasError ? "text-red-400" : ""}
-                  >
-                    {lineNumber}
-                  </div>
-                );
-              })}
-            </div>
-
-            <textarea
-              ref={textareaRef}
+        <div className="min-h-0 flex-1 p-4">
+          <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-950">
+            <CodeMirror
               value={schemaText}
-              onChange={(e) => setSchemaText(e.target.value)}
-              onKeyDown={handleTextareaKeyDown}
-              spellCheck={false}
-              className="h-full w-full resize-none bg-slate-950 p-4 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 focus:border-blue-500"
-              placeholder={`User
-  id int pk
-  name string
-  email string`}
+              theme="dark"
+              basicSetup={{
+                foldGutter: false,
+                dropCursor: false,
+                allowMultipleSelections: false,
+                indentOnInput: false,
+                lineNumbers: true,
+              }}
+              extensions={editorExtensions}
+              onChange={(value) => setSchemaText(value)}
+              className="h-full min-h-0 text-sm"
             />
           </div>
         </div>
