@@ -246,6 +246,59 @@ function buildInitialGraph(text: string) {
   };
 }
 
+function mapFieldTypeToSQL(type: string) {
+  switch (type.toLowerCase()) {
+    case "int":
+    case "integer":
+      return "INTEGER";
+    case "string":
+    case "text":
+      return "VARCHAR(255)";
+    case "boolean":
+    case "bool":
+      return "BOOLEAN";
+    case "date":
+      return "DATE";
+    case "datetime":
+      return "TIMESTAMP";
+    case "float":
+      return "FLOAT";
+    case "uuid":
+      return "UUID";
+    default:
+      return "TEXT";
+  }
+}
+
+function generateSQLFromText(text: string) {
+  const tables = parseSchema(text);
+
+  return tables
+    .map((table) => {
+      const columnLines: string[] = [];
+      const foreignKeys: string[] = [];
+
+      table.fields.forEach((field) => {
+        const sqlType = mapFieldTypeToSQL(field.type);
+
+        columnLines.push(
+          `  ${field.name} ${sqlType}${field.isPrimary ? " PRIMARY KEY" : ""}`,
+        );
+
+        if (field.reference) {
+          foreignKeys.push(
+            `  FOREIGN KEY (${field.name}) REFERENCES ${field.reference.table}(${field.reference.field})`,
+          );
+        }
+      });
+
+      const lines = [...columnLines, ...foreignKeys].join(",\n");
+
+      return `CREATE TABLE ${table.name} (\n${lines}\n);`;
+    })
+    .join("\n\n");
+}
+
 function ERDBoardInner() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -263,6 +316,17 @@ function ERDBoardInner() {
   const [edges, setEdges, onEdgesChange] = useEdgesState(
     initialGraphRef.current.edges,
   );
+
+  const exportSQL = async () => {
+    const sql = generateSQLFromText(schemaText);
+
+    try {
+      await navigator.clipboard.writeText(sql);
+      alert("SQL copiado al portapapeles");
+    } catch {
+      alert(sql);
+    }
+  };
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -449,7 +513,10 @@ function ERDBoardInner() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 px-4 py-3">
-          <button className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-blue-500 hover:text-blue-400">
+          <button
+            onClick={exportSQL}
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-blue-500 hover:text-blue-400"
+          >
             Exportar SQL
           </button>
 
