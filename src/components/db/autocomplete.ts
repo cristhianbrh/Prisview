@@ -3,7 +3,7 @@ import type {
   CompletionContext,
   CompletionResult,
 } from "@codemirror/autocomplete";
-import { parseSchema } from "./parser";
+import { analyzeSchema } from "./parser";
 
 const staticSchemaKeywords: Completion[] = [
   { label: "pk", type: "keyword", detail: "primary key", boost: 80 },
@@ -66,9 +66,7 @@ function getLineContext(context: CompletionContext) {
   const beforeCursor = line.text.slice(0, context.pos - line.from);
 
   return {
-    line,
     beforeCursor,
-    trimmedBeforeCursor: beforeCursor.trimStart(),
     isFieldLine: /^\s+/.test(line.text),
   };
 }
@@ -114,37 +112,26 @@ export function schemaCompletionSource(
     return null;
   }
 
-  const doc = context.state.doc.toString();
-  const tables = parseSchema(doc);
+  const analysis = analyzeSchema(context.state.doc.toString());
+  const tableNames = analysis.tables.map((table) => table.name);
+  const { beforeCursor, isFieldLine } = getLineContext(context);
 
-  const tableMap = new Map(tables.map((table) => [table.name, table]));
-  const tableNames = tables.map((table) => table.name);
-
-  const { beforeCursor, trimmedBeforeCursor, isFieldLine } =
-    getLineContext(context);
-
-  // Caso 1: después de "ref " sugerir tablas
-  // Ejemplo: "userId int ref Us"
   const refTableMatch = beforeCursor.match(/\bref\s+([A-Za-z_]\w*)?$/);
   if (refTableMatch) {
     const query = refTableMatch[1] ?? "";
 
-    const options = sortCompletions(
-      buildTableCompletions(tableNames).filter(
-        (item) => query === "" || startsWithInsensitive(item.label, query),
-      ),
-      query,
-    );
-
     return {
       from,
-      options,
+      options: sortCompletions(
+        buildTableCompletions(tableNames).filter(
+          (item) => query === "" || startsWithInsensitive(item.label, query),
+        ),
+        query,
+      ),
       validFor: /^[A-Za-z_]\w*$/,
     };
   }
 
-  // Caso 2: después de "ref Tabla." sugerir campos de esa tabla
-  // Ejemplo: "userId int ref User."
   const refTableFieldDotMatch = beforeCursor.match(
     /\bref\s+([A-Za-z_]\w*)\.([\w]*)$/,
   );
@@ -152,65 +139,51 @@ export function schemaCompletionSource(
   if (refTableFieldDotMatch) {
     const tableName = refTableFieldDotMatch[1];
     const fieldPrefix = refTableFieldDotMatch[2] ?? "";
-    const table = tableMap.get(tableName);
+    const table = analysis.tableMap.get(tableName);
 
     if (!table) return null;
 
-    const options = sortCompletions(
-      buildFieldReferenceCompletions(
-        tableName,
-        table.fields.map((field) => field.name),
-      ).filter(
-        (item) =>
-          fieldPrefix === "" ||
-          startsWithInsensitive(item.label, `${tableName}.${fieldPrefix}`),
-      ),
-      `${tableName}.${fieldPrefix}`,
-    );
-
     return {
       from,
-      options,
+      options: sortCompletions(
+        buildFieldReferenceCompletions(
+          tableName,
+          table.fields.map((field) => field.name),
+        ).filter(
+          (item) =>
+            fieldPrefix === "" ||
+            startsWithInsensitive(item.label, `${tableName}.${fieldPrefix}`),
+        ),
+        `${tableName}.${fieldPrefix}`,
+      ),
       validFor: /^[A-Za-z_][\w.]*$/,
     };
   }
 
-  // Caso 3: "Tabla." o "Tabla.cam"
   const directTableFieldMatch = text.match(/^([A-Za-z_]\w*)\.([\w]*)$/);
   if (directTableFieldMatch) {
     const tableName = directTableFieldMatch[1];
     const fieldPrefix = directTableFieldMatch[2] ?? "";
-    const table = tableMap.get(tableName);
+    const table = analysis.tableMap.get(tableName);
 
     if (!table) return null;
 
-    const options = sortCompletions(
-      buildFieldReferenceCompletions(
-        tableName,
-        table.fields.map((field) => field.name),
-      ).filter((item) =>
-        startsWithInsensitive(item.label, `${tableName}.${fieldPrefix}`),
-      ),
-      `${tableName}.${fieldPrefix}`,
-    );
-
     return {
       from,
-      options,
+      options: sortCompletions(
+        buildFieldReferenceCompletions(
+          tableName,
+          table.fields.map((field) => field.name),
+        ).filter((item) =>
+          startsWithInsensitive(item.label, `${tableName}.${fieldPrefix}`),
+        ),
+        `${tableName}.${fieldPrefix}`,
+      ),
       validFor: /^[A-Za-z_][\w.]*$/,
     };
   }
 
-  // Caso 4: línea de campo, sin contexto de ref.
-  // Aquí priorizamos tipos y keywords antes que nombres de tabla.
-  // Meter tablas aquí arriba de todo sería ruido.
   if (isFieldLine) {
-    const fieldNamesAcrossSchema = Array.from(
-      new Set(
-        tables.flatMap((table) => table.fields.map((field) => field.name)),
-      ),
-    );
-
     const keywordAndTypeOptions = staticSchemaKeywords.filter(
       (item) =>
         text === "" ||
@@ -218,7 +191,7 @@ export function schemaCompletionSource(
         includesInsensitive(item.label, text),
     );
 
-    const fieldOptions = buildFieldNameOnlyCompletions(fieldNamesAcrossSchema)
+    const fieldOptions = buildFieldNameOnlyCompletions(analysis.allFieldNames)
       .filter((item) => text === "" || startsWithInsensitive(item.label, text))
       .map((item) => ({
         ...item,
@@ -232,20 +205,16 @@ export function schemaCompletionSource(
         boost: 10,
       }));
 
-    const options = sortCompletions(
-      [...keywordAndTypeOptions, ...fieldOptions, ...tableOptions],
-      text,
-    );
-
     return {
       from,
-      options,
+      options: sortCompletions(
+        [...keywordAndTypeOptions, ...fieldOptions, ...tableOptions],
+        text,
+      ),
       validFor: /^[A-Za-z_]\w*$/,
     };
   }
 
-  // Caso 5: línea de tabla o contexto general.
-  // Aquí las tablas tienen prioridad real.
   const generalTableOptions = buildTableCompletions(tableNames).filter(
     (item) => text === "" || startsWithInsensitive(item.label, text),
   );
@@ -262,14 +231,12 @@ export function schemaCompletionSource(
       boost: (item.boost ?? 0) - 20,
     }));
 
-  const options = sortCompletions(
-    [...generalTableOptions, ...generalKeywordOptions],
-    text,
-  );
-
   return {
     from,
-    options,
+    options: sortCompletions(
+      [...generalTableOptions, ...generalKeywordOptions],
+      text,
+    ),
     validFor: /^[A-Za-z_]\w*$/,
   };
 }

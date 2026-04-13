@@ -14,6 +14,7 @@ import CodeMirror from "@uiw/react-codemirror";
 import { autocompletion } from "@codemirror/autocomplete";
 import { linter, lintGutter } from "@codemirror/lint";
 import { EditorView } from "@codemirror/view";
+
 import TableNode from "./TableNode";
 import { schemaCompletionSource } from "./autocomplete";
 import {
@@ -24,8 +25,8 @@ import {
   mergeNodesPreservingPositions,
   type NodePositionMap,
 } from "./graph";
-import { parseSchema, validateSchema } from "./parser";
-import { generateSQLFromText, type SqlDialect } from "./sql";
+import { analyzeSchema } from "./schemaAnalysis";
+import { generateSQLFromAnalysis, type SqlDialect } from "./sql";
 import {
   getStoredJson,
   getStoredNumberInRange,
@@ -89,6 +90,7 @@ function getInitialDialect(): SqlDialect {
 
 function ERDBoardInner() {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const hasRestoredPanelWidthRef = useRef(false);
 
   const [schemaText, setSchemaText] = useState(() =>
     getStoredString(STORAGE_KEYS.schemaText, initialText),
@@ -103,15 +105,13 @@ function ERDBoardInner() {
   const { setViewport, getViewport } = useReactFlow();
 
   const [showSqlPreview, setShowSqlPreview] = useState(false);
-  const [isResizing, setIsResizing] = useState(false);
   const [sqlPreview, setSqlPreview] = useState("");
   const [schemaErrors, setSchemaErrors] = useState<
     Array<{ line?: number; message: string }>
   >([]);
 
-  const [leftPanelWidth, setLeftPanelWidth] = useState(() =>
-    getStoredNumberInRange(STORAGE_KEYS.leftPanelWidth, 50, 25, 75),
-  );
+  // Arranca con valor seguro. La restauración real se hace explícitamente al montar.
+  const [leftPanelWidth, setLeftPanelWidth] = useState(50);
 
   const persistedNodePositionsRef = useRef<NodePositionMap>(
     getStoredJson(STORAGE_KEYS.nodePositions, {}),
@@ -121,13 +121,19 @@ function ERDBoardInner() {
     buildInitialGraph(schemaText, persistedNodePositionsRef.current),
   );
 
-  const nodesRef = useRef(initialGraphRef.current.nodes);
-
   const [nodes, setNodes, onNodesChange] = useNodesState(
     initialGraphRef.current.nodes,
   );
   const [edges, setEdges, onEdgesChange] = useEdgesState(
     initialGraphRef.current.edges,
+  );
+
+  const nodesRef = useRef(initialGraphRef.current.nodes);
+
+  const schemaAnalysis = useMemo(() => analyzeSchema(schemaText), [schemaText]);
+  const debouncedSchemaAnalysis = useMemo(
+    () => analyzeSchema(debouncedText),
+    [debouncedText],
   );
 
   const handleMoveEnd = () => {
@@ -150,7 +156,22 @@ function ERDBoardInner() {
     nodesRef.current = nodes;
   }, [nodes]);
 
+  // Restauración explícita del ancho del panel al montar.
   useEffect(() => {
+    const storedWidth = getStoredNumberInRange(
+      STORAGE_KEYS.leftPanelWidth,
+      50,
+      25,
+      75,
+    );
+
+    setLeftPanelWidth(storedWidth);
+    hasRestoredPanelWidthRef.current = true;
+  }, []);
+
+  // No persistir hasta haber restaurado.
+  useEffect(() => {
+    if (!hasRestoredPanelWidthRef.current) return;
     setStoredValue(STORAGE_KEYS.leftPanelWidth, String(leftPanelWidth));
   }, [leftPanelWidth]);
 
@@ -189,10 +210,9 @@ function ERDBoardInner() {
     () =>
       linter((view) => {
         const text = view.state.doc.toString();
-        const tables = parseSchema(text);
-        const validation = validateSchema(tables, text);
+        const analysis = analyzeSchema(text);
 
-        return validation.errors
+        return analysis.validation.errors
           .filter((error) => typeof error.line === "number")
           .map((error) => {
             const line = view.state.doc.line(error.line!);
@@ -216,33 +236,81 @@ function ERDBoardInner() {
     [],
   );
 
-  const autocompleteTheme = EditorView.theme({
-    ".cm-tooltip": {
-      backgroundColor: "#020617",
-      border: "1px solid #1e293b",
-      borderRadius: "12px",
-      padding: "4px",
-    },
-    ".cm-tooltip-autocomplete": {
-      backgroundColor: "#020617",
-    },
-    ".cm-tooltip-autocomplete ul": {
-      fontSize: "13px",
-    },
-    ".cm-tooltip-autocomplete li": {
-      padding: "6px 10px",
-      borderRadius: "8px",
-      color: "#cbd5f5",
-      cursor: "pointer",
-    },
-    ".cm-tooltip-autocomplete li[aria-selected]": {
-      backgroundColor: "#1e293b",
-      color: "#60a5fa",
-    },
-    ".cm-tooltip-autocomplete li:hover": {
-      backgroundColor: "#1e293b",
-    },
-  });
+  const autocompleteTheme = useMemo(
+    () =>
+      EditorView.theme({
+        ".cm-tooltip": {
+          backgroundColor: "#020617",
+          border: "1px solid #1e293b",
+          borderRadius: "12px",
+          padding: "4px",
+          boxShadow: "0 10px 30px rgba(0, 0, 0, 0.35)",
+        },
+        ".cm-tooltip-autocomplete": {
+          backgroundColor: "#020617",
+        },
+        ".cm-tooltip-autocomplete ul": {
+          fontSize: "13px",
+          maxHeight: "240px",
+        },
+        ".cm-tooltip-autocomplete li": {
+          padding: "6px 10px",
+          borderRadius: "8px",
+          color: "#cbd5e1",
+        },
+        ".cm-tooltip-autocomplete li[aria-selected]": {
+          backgroundColor: "#1e293b",
+          color: "#60a5fa",
+        },
+      }),
+    [],
+  );
+
+  const editorTheme = useMemo(
+    () =>
+      EditorView.theme({
+        "&": {
+          height: "100%",
+          minHeight: "0",
+          color: "#e2e8f0",
+          fontSize: "14px",
+          backgroundColor: "transparent !important",
+        },
+        "&.cm-editor": {
+          height: "100%",
+          minHeight: "0",
+          backgroundColor: "transparent !important",
+        },
+        ".cm-scroller": {
+          overflow: "auto",
+          backgroundColor: "transparent !important",
+        },
+        ".cm-gutters": {
+          backgroundColor: "#0f172a !important",
+          color: "#64748b",
+          borderRight: "1px solid #1e293b",
+        },
+        ".cm-activeLineGutter": {
+          backgroundColor: "transparent !important",
+          color: "#94a3b8",
+        },
+        ".cm-content": {
+          padding: "16px",
+          minHeight: "100%",
+          backgroundColor: "transparent !important",
+        },
+        "&.cm-focused": {
+          outline: "none",
+        },
+        ".cm-line": {
+          padding: "0",
+        },
+        ".cm-diagnostic": {
+          fontSize: "12px",
+        },
+      }),
+    [],
+  );
 
   const editorExtensions = useMemo(
     () => [
@@ -251,62 +319,15 @@ function ERDBoardInner() {
       schemaLinter,
       schemaAutocomplete,
       autocompleteTheme,
-      EditorView.theme({
-        "&": {
-          height: "100%",
-          minHeight: "0",
-          //   backgroundColor: "#020617",
-          backgroundColor: "transparent !important",
-
-          color: "#e2e8f0",
-          fontSize: "14px",
-        },
-        ".cm-editor": {
-          height: "100%",
-          minHeight: "0",
-          backgroundColor: "transparent",
-        },
-        ".cm-scroller": {
-          overflow: "auto",
-        },
-        ".cm-gutters": {
-          backgroundColor: "#0f172a",
-          color: "#64748b",
-          borderRight: "1px solid #1e293b",
-        },
-        ".cm-activeLineGutter": {
-          backgroundColor: "transparent",
-          color: "#94a3b8",
-        },
-        ".cm-content": {
-          padding: "16px",
-          minHeight: "100%",
-          backgroundColor: "transparent",
-        },
-        "&.cm-focused": {
-          outline: "none",
-        },
-        ".cm-line": {
-          padding: 0,
-        },
-        ".cm-diagnostic": {
-          fontSize: "12px",
-        },
-        "cm-activeLine": {
-          backgroundColor: "#0f172a",
-        },
-      }),
+      editorTheme,
     ],
-    [schemaAutocomplete, schemaLinter],
+    [schemaAutocomplete, schemaLinter, autocompleteTheme, editorTheme],
   );
 
   const exportSQL = () => {
-    const tables = parseSchema(schemaText);
-    const validation = validateSchema(tables, schemaText);
-
-    if (!validation.valid) {
+    if (!schemaAnalysis.validation.valid) {
       setSchemaErrors(
-        validation.errors.map((error) => ({
+        schemaAnalysis.validation.errors.map((error) => ({
           line: error.line,
           message: error.message,
         })),
@@ -317,7 +338,7 @@ function ERDBoardInner() {
     }
 
     setSchemaErrors([]);
-    setSqlPreview(generateSQLFromText(schemaText, sqlDialect));
+    setSqlPreview(generateSQLFromAnalysis(schemaAnalysis, sqlDialect));
     setShowSqlPreview(true);
   };
 
@@ -335,7 +356,7 @@ function ERDBoardInner() {
       {},
     );
 
-    const nextRawNodes = buildRawNodes(debouncedText);
+    const nextRawNodes = buildRawNodes(debouncedSchemaAnalysis.text);
     const mergedNodes = mergeNodesPreservingPositions(
       nodesRef.current,
       nextRawNodes,
@@ -343,58 +364,22 @@ function ERDBoardInner() {
     );
 
     setNodes(mergedNodes);
-  }, [debouncedText, setNodes]);
+  }, [debouncedSchemaAnalysis, setNodes]);
+
+  useEffect(() => {
+    setEdges(buildRawEdges(debouncedSchemaAnalysis.text, nodes));
+  }, [nodes, debouncedSchemaAnalysis, setEdges]);
 
   useEffect(() => {
     if (!showSqlPreview) return;
 
-    const tables = parseSchema(schemaText);
-    const validation = validateSchema(tables, schemaText);
-
-    if (!validation.valid) {
+    if (!schemaAnalysis.validation.valid) {
       setSqlPreview("");
       return;
     }
 
-    setSqlPreview(generateSQLFromText(schemaText, sqlDialect));
-  }, [schemaText, sqlDialect, showSqlPreview]);
-
-  useEffect(() => {
-    if (!isResizing) return;
-
-    const handlePointerMove = (event: PointerEvent) => {
-      const container = containerRef.current;
-      if (!container) return;
-
-      const rect = container.getBoundingClientRect();
-      const nextWidth = ((event.clientX - rect.left) / rect.width) * 100;
-
-      setLeftPanelWidth(clamp(nextWidth, 25, 75));
-    };
-
-    const handlePointerUp = () => {
-      setIsResizing(false);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", handlePointerUp);
-
-    return () => {
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", handlePointerUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-  }, [isResizing]);
-
-  useEffect(() => {
-    setEdges(buildRawEdges(debouncedText, nodes));
-  }, [nodes, debouncedText, setEdges]);
+    setSqlPreview(generateSQLFromAnalysis(schemaAnalysis, sqlDialect));
+  }, [schemaAnalysis, sqlDialect, showSqlPreview]);
 
   const clearAll = () => {
     setSchemaText("");
@@ -420,13 +405,60 @@ function ERDBoardInner() {
   const autoLayout = () => {
     setNodes((prevNodes) => {
       const layoutedNodes = getLayoutedElements(prevNodes, edges).nodes;
-      setEdges(buildRawEdges(debouncedText, layoutedNodes));
       return layoutedNodes;
     });
   };
 
-  const handleResizeStart = () => {
-    setIsResizing(true);
+  const handleResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    const separator = event.currentTarget;
+    const container = containerRef.current;
+
+    if (!container) return;
+
+    event.preventDefault();
+    separator.setPointerCapture(event.pointerId);
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const updateWidth = (clientX: number) => {
+      const rect = container.getBoundingClientRect();
+      if (rect.width <= 0) return;
+
+      const nextWidth = ((clientX - rect.left) / rect.width) * 100;
+      setLeftPanelWidth(clamp(nextWidth, 25, 75));
+    };
+
+    updateWidth(event.clientX);
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      updateWidth(moveEvent.clientX);
+    };
+
+    const cleanup = () => {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+
+      try {
+        if (separator.hasPointerCapture(event.pointerId)) {
+          separator.releasePointerCapture(event.pointerId);
+        }
+      } catch {
+        // Ignorar errores de pointer capture.
+      }
+    };
+
+    const handlePointerUp = () => {
+      cleanup();
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
   };
 
   return (
@@ -435,7 +467,7 @@ function ERDBoardInner() {
       className="flex h-screen w-full overflow-hidden bg-slate-950 text-slate-100"
     >
       <section
-        className="flex h-full min-w-[320px] flex-col bg-slate-900"
+        className="flex h-full min-w-[320px] shrink-0 flex-col bg-slate-900"
         style={{ width: `${leftPanelWidth}%` }}
       >
         <div className="border-b border-slate-800 px-4 py-3">
@@ -443,7 +475,7 @@ function ERDBoardInner() {
             Schema Editor
           </h1>
           <p className="mt-1 text-xs text-slate-400">
-            Las tablas movidas conservan su posicion. Las nuevas se colocan
+            Las tablas movidas conservan su posición. Las nuevas se colocan
             solas.
           </p>
         </div>
@@ -497,7 +529,7 @@ function ERDBoardInner() {
             <ul className="space-y-1 text-xs text-red-200">
               {schemaErrors.map((error, index) => (
                 <li key={`${error.message}-${index}`}>
-                  - {error.line ? `Linea ${error.line}: ` : ""}
+                  - {error.line ? `Línea ${error.line}: ` : ""}
                   {error.message}
                 </li>
               ))}
@@ -556,7 +588,7 @@ function ERDBoardInner() {
               }}
               extensions={editorExtensions}
               onChange={(value) => setSchemaText(value)}
-              className="h-full min-h-0 text-sm"
+              className="h-full min-h-0 bg-transparent text-sm [&_.cm-editor]:bg-transparent [&_.cm-scroller]:bg-transparent [&_.cm-content]:bg-transparent"
             />
           </div>
         </div>
@@ -567,12 +599,12 @@ function ERDBoardInner() {
         aria-orientation="vertical"
         aria-label="Redimensionar paneles"
         onPointerDown={handleResizeStart}
-        className="group relative w-2 cursor-col-resize bg-slate-900"
+        className="group relative w-2 shrink-0 cursor-col-resize touch-none bg-slate-900"
       >
         <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-slate-700 transition group-hover:bg-blue-500" />
       </div>
 
-      <section className="h-full flex-1 bg-slate-950">
+      <section className="h-full min-w-0 flex-1 bg-slate-950">
         <div className="h-full w-full">
           <ReactFlow
             nodes={nodes}

@@ -1,6 +1,6 @@
 import dagre from "@dagrejs/dagre";
 import { MarkerType, Position, type Edge, type Node } from "@xyflow/react";
-import { parseSchema } from "./parser";
+import { analyzeSchema } from "./parser";
 
 const NODE_WIDTH = 280;
 const NODE_HEIGHT = 180;
@@ -11,9 +11,9 @@ const START_Y = 80;
 
 export type NodePositionMap = Record<string, { x: number; y: number }>;
 
-export function buildRawNodes(text: string): Node[] {
-  const tables = parseSchema(text);
-
+function buildRawNodesFromTables(
+  tables: ReturnType<typeof analyzeSchema>["tables"],
+): Node[] {
   return tables.map((table) => ({
     id: table.name,
     type: "tableNode",
@@ -28,8 +28,10 @@ export function buildRawNodes(text: string): Node[] {
   }));
 }
 
-export function buildRawEdges(text: string, positionedNodes: Node[]): Edge[] {
-  const tables = parseSchema(text);
+function buildRawEdgesFromTables(
+  tables: ReturnType<typeof analyzeSchema>["tables"],
+  positionedNodes: Node[],
+): Edge[] {
   const edges: Edge[] = [];
   const nodeMap = new Map(positionedNodes.map((node) => [node.id, node]));
   const tableMap = new Map(tables.map((table) => [table.name, table]));
@@ -75,6 +77,14 @@ export function buildRawEdges(text: string, positionedNodes: Node[]): Edge[] {
   });
 
   return edges;
+}
+
+export function buildRawNodes(text: string): Node[] {
+  return buildRawNodesFromTables(analyzeSchema(text).tables);
+}
+
+export function buildRawEdges(text: string, positionedNodes: Node[]): Edge[] {
+  return buildRawEdgesFromTables(analyzeSchema(text).tables, positionedNodes);
 }
 
 function rectsOverlap(
@@ -221,17 +231,13 @@ export function buildInitialGraph(
   text: string,
   persistedPositions: NodePositionMap,
 ) {
-  const rawNodes = buildRawNodes(text);
-
-  // El layout inicial debe considerar relaciones reales.
-  const rawEdges = buildRawEdges(text, rawNodes);
+  const analysis = analyzeSchema(text);
+  const rawNodes = buildRawNodesFromTables(analysis.tables);
+  const rawEdges = buildRawEdgesFromTables(analysis.tables, rawNodes);
 
   const layoutedNodes = getLayoutedElements(rawNodes, rawEdges).nodes;
   const hydratedNodes = hydrateNodePositions(layoutedNodes, persistedPositions);
-
-  // Recalcular edges con posiciones ya hidratadas para que el lado
-  // izquierdo/derecho de los handles quede correcto.
-  const hydratedEdges = buildRawEdges(text, hydratedNodes);
+  const hydratedEdges = buildRawEdgesFromTables(analysis.tables, hydratedNodes);
 
   return {
     nodes: hydratedNodes,
