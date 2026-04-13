@@ -44,6 +44,7 @@ const STORAGE_KEYS = {
   sqlDialect: "erd-builder:sqlDialect",
   nodePositions: "erd-builder:nodePositions",
   viewport: "erd-builder:viewport",
+  leftPanelWidth: "erd-builder:leftPanelWidth",
 };
 
 const NODE_WIDTH = 280;
@@ -585,14 +586,22 @@ function ERDBoardInner() {
   const { setViewport, getViewport } = useReactFlow();
 
   const [showSqlPreview, setShowSqlPreview] = useState(false);
-  const [leftPanelWidth, setLeftPanelWidth] = useState(50);
   const [isResizing, setIsResizing] = useState(false);
   const [sqlPreview, setSqlPreview] = useState("");
   const [schemaErrors, setSchemaErrors] = useState<
     Array<{ line?: number; message: string }>
   >([]);
 
-  const initialGraphRef = useRef(buildInitialGraph(initialText));
+  const [leftPanelWidth, setLeftPanelWidth] = useState(50);
+
+  useEffect(() => {
+    const saved = Number(localStorage.getItem(STORAGE_KEYS.leftPanelWidth));
+    if (Number.isFinite(saved) && saved >= 25 && saved <= 75) {
+      setLeftPanelWidth(saved);
+    }
+  }, []);
+
+  const initialGraphRef = useRef(buildInitialGraph(schemaText));
 
   const [nodes, setNodes, onNodesChange] = useNodesState(
     initialGraphRef.current.nodes,
@@ -607,19 +616,35 @@ function ERDBoardInner() {
   };
 
   useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.leftPanelWidth, String(leftPanelWidth));
+  }, [leftPanelWidth]);
+
+  //   useEffect(() => {
+  //     const raw = localStorage.getItem(STORAGE_KEYS.viewport);
+  //     if (!raw) return;
+
+  //     try {
+  //       const parsed = JSON.parse(raw) as { x: number; y: number; zoom: number };
+
+  //       requestAnimationFrame(() => {
+  //         setViewport(parsed);
+  //       });
+  //     } catch {
+  //       // ignorar datos corruptos
+  //     }
+  //   }, [setViewport]);
+
+  const handleInit = () => {
     const raw = localStorage.getItem(STORAGE_KEYS.viewport);
     if (!raw) return;
 
     try {
       const parsed = JSON.parse(raw) as { x: number; y: number; zoom: number };
-
-      requestAnimationFrame(() => {
-        setViewport(parsed);
-      });
+      setViewport(parsed);
     } catch {
       // ignorar datos corruptos
     }
-  }, [setViewport]);
+  };
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.schemaText, schemaText);
@@ -833,6 +858,7 @@ function ERDBoardInner() {
     localStorage.removeItem(STORAGE_KEYS.schemaText);
     localStorage.removeItem(STORAGE_KEYS.nodePositions);
     localStorage.removeItem(STORAGE_KEYS.viewport);
+    localStorage.removeItem(STORAGE_KEYS.leftPanelWidth);
   };
 
   const autoLayout = () => {
@@ -1000,8 +1026,8 @@ function ERDBoardInner() {
             onEdgesChange={onEdgesChange}
             nodeTypes={nodeTypes}
             onMoveEnd={handleMoveEnd}
-            
             proOptions={{ hideAttribution: true }}
+            onInit={handleInit}
           >
             <MiniMap className="!bg-slate-900" pannable zoomable />
             <Controls className="!border !border-slate-700 !bg-slate-900" />
