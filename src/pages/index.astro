@@ -1,14 +1,8 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro';
+import ERDBoard from '../components/db/ERDBoard';
 ---
 
 <BaseLayout title="Quick DB Clone">
-  <main class="flex h-screen items-center justify-center bg-slate-950 text-slate-100">
-    <div class="rounded-2xl border border-slate-800 bg-slate-900 px-6 py-4 shadow-xl">
-      <h1 class="text-lg font-semibold text-blue-400">Quick DB Clone</h1>
-      <p class="mt-2 text-sm text-slate-300">
-        Base Astro + Tailwind lista.
-      </p>
-    </div>
-  </main>
+  <ERDBoard client:load />
 </BaseLayout>
