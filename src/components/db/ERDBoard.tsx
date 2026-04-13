@@ -8,6 +8,7 @@ import {
   ReactFlowProvider,
   useEdgesState,
   useNodesState,
+  useReactFlow,
   type Edge,
   type Node,
 } from "@xyflow/react";
@@ -36,6 +37,13 @@ Comment
 
 const nodeTypes = {
   tableNode: TableNode,
+};
+
+const STORAGE_KEYS = {
+  schemaText: "erd-builder:schemaText",
+  sqlDialect: "erd-builder:sqlDialect",
+  nodePositions: "erd-builder:nodePositions",
+  viewport: "erd-builder:viewport",
 };
 
 const NODE_WIDTH = 280;
@@ -165,12 +173,47 @@ function findFreePosition(existingNodes: Node[]) {
   };
 }
 
+function applyPersistedNodePositions(nodes: Node[]): Node[] {
+  if (typeof window === "undefined") return nodes;
+
+  const raw = localStorage.getItem(STORAGE_KEYS.nodePositions);
+  if (!raw) return nodes;
+
+  try {
+    const saved = JSON.parse(raw) as Record<string, { x: number; y: number }>;
+
+    return nodes.map((node) => {
+      const persistedPosition = saved[node.id];
+      if (!persistedPosition) return node;
+
+      return {
+        ...node,
+        position: persistedPosition,
+      };
+    });
+  } catch {
+    return nodes;
+  }
+}
+
 function mergeNodesPreservingPositions(
   prevNodes: Node[],
   nextRawNodes: Node[],
 ): Node[] {
   const prevMap = new Map(prevNodes.map((node) => [node.id, node]));
   const merged: Node[] = [];
+
+  let persistedPositions: Record<string, { x: number; y: number }> = {};
+
+  if (typeof window !== "undefined") {
+    try {
+      persistedPositions = JSON.parse(
+        localStorage.getItem(STORAGE_KEYS.nodePositions) ?? "{}",
+      );
+    } catch {
+      persistedPositions = {};
+    }
+  }
 
   for (const rawNode of nextRawNodes) {
     const existing = prevMap.get(rawNode.id);
@@ -181,6 +224,16 @@ function mergeNodesPreservingPositions(
         position: existing.position,
         selected: existing.selected,
         dragging: false,
+      });
+      continue;
+    }
+
+    const persistedPosition = persistedPositions[rawNode.id];
+
+    if (persistedPosition) {
+      merged.push({
+        ...rawNode,
+        position: persistedPosition,
       });
       continue;
     }
@@ -344,10 +397,11 @@ function schemaCompletionSource(context: any) {
 function buildInitialGraph(text: string) {
   const rawNodes = buildRawNodes(text);
   const layoutedNodes = getLayoutedElements(rawNodes, []).nodes;
-  const rawEdges = buildRawEdges(text, layoutedNodes);
+  const hydratedNodes = applyPersistedNodePositions(layoutedNodes);
+  const rawEdges = buildRawEdges(text, hydratedNodes);
 
   return {
-    nodes: layoutedNodes,
+    nodes: hydratedNodes,
     edges: rawEdges,
   };
 }
@@ -510,10 +564,27 @@ function downloadTextFile(content: string, filename: string) {
 function ERDBoardInner() {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
-  const [sqlDialect, setSqlDialect] = useState<SqlDialect>("postgres");
-  const [debouncedText, setDebouncedText] = useState(initialText);
+  const [schemaText, setSchemaText] = useState(() => {
+    if (typeof window === "undefined") return initialText;
+    return localStorage.getItem(STORAGE_KEYS.schemaText) ?? initialText;
+  });
+
+  const [debouncedText, setDebouncedText] = useState(() => {
+    if (typeof window === "undefined") return initialText;
+    return localStorage.getItem(STORAGE_KEYS.schemaText) ?? initialText;
+  });
+
+  const [sqlDialect, setSqlDialect] = useState<SqlDialect>(() => {
+    if (typeof window === "undefined") return "postgres";
+    const saved = localStorage.getItem(STORAGE_KEYS.sqlDialect);
+    return saved === "mysql" || saved === "sqlite" || saved === "postgres"
+      ? saved
+      : "postgres";
+  });
+
+  const { setViewport, getViewport } = useReactFlow();
+
   const [showSqlPreview, setShowSqlPreview] = useState(false);
-  const [schemaText, setSchemaText] = useState(initialText);
   const [leftPanelWidth, setLeftPanelWidth] = useState(50);
   const [isResizing, setIsResizing] = useState(false);
   const [sqlPreview, setSqlPreview] = useState("");
@@ -529,6 +600,48 @@ function ERDBoardInner() {
   const [edges, setEdges, onEdgesChange] = useEdgesState(
     initialGraphRef.current.edges,
   );
+
+  const handleMoveEnd = () => {
+    const viewport = getViewport();
+    localStorage.setItem(STORAGE_KEYS.viewport, JSON.stringify(viewport));
+  };
+
+  useEffect(() => {
+    const raw = localStorage.getItem(STORAGE_KEYS.viewport);
+    if (!raw) return;
+
+    try {
+      const parsed = JSON.parse(raw) as { x: number; y: number; zoom: number };
+
+      requestAnimationFrame(() => {
+        setViewport(parsed);
+      });
+    } catch {
+      // ignorar datos corruptos
+    }
+  }, [setViewport]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.schemaText, schemaText);
+  }, [schemaText]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.sqlDialect, sqlDialect);
+  }, [sqlDialect]);
+
+  useEffect(() => {
+    const positions = Object.fromEntries(
+      nodes.map((node) => [
+        node.id,
+        {
+          x: node.position.x,
+          y: node.position.y,
+        },
+      ]),
+    );
+
+    localStorage.setItem(STORAGE_KEYS.nodePositions, JSON.stringify(positions));
+  }, [nodes]);
 
   const downloadSQL = () => {
     if (!sqlPreview) return;
@@ -713,6 +826,13 @@ function ERDBoardInner() {
     setDebouncedText("");
     setNodes([]);
     setEdges([]);
+    setSchemaErrors([]);
+    setSqlPreview("");
+    setShowSqlPreview(false);
+
+    localStorage.removeItem(STORAGE_KEYS.schemaText);
+    localStorage.removeItem(STORAGE_KEYS.nodePositions);
+    localStorage.removeItem(STORAGE_KEYS.viewport);
   };
 
   const autoLayout = () => {
@@ -879,7 +999,8 @@ function ERDBoardInner() {
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             nodeTypes={nodeTypes}
-            fitView
+            onMoveEnd={handleMoveEnd}
+            
             proOptions={{ hideAttribution: true }}
           >
             <MiniMap className="!bg-slate-900" pannable zoomable />
