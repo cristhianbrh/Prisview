@@ -58,9 +58,11 @@ function buildRawNodes(text: string): Node[] {
   }));
 }
 
-function buildRawEdges(text: string): Edge[] {
+function buildRawEdges(text: string, positionedNodes: Node[]): Edge[] {
   const tables = parseSchema(text);
   const edges: Edge[] = [];
+
+  const nodeMap = new Map(positionedNodes.map((node) => [node.id, node]));
 
   tables.forEach((table) => {
     table.fields.forEach((field) => {
@@ -72,12 +74,28 @@ function buildRawEdges(text: string): Edge[] {
 
       if (!targetTable) return;
 
+      const sourceNode = nodeMap.get(table.name);
+      const targetNode = nodeMap.get(targetTable.name);
+
+      if (!sourceNode || !targetNode) return;
+
+      const sourceCenterX = sourceNode.position.x + NODE_WIDTH / 2;
+      const targetCenterX = targetNode.position.x + NODE_WIDTH / 2;
+
+      const sourceIsLeftOfTarget = sourceCenterX < targetCenterX;
+
       edges.push({
         id: `${table.name}-${field.name}-${field.reference.table}-${field.reference.field}`,
         source: table.name,
         target: targetTable.name,
-        sourceHandle: undefined,
-        targetHandle: undefined,
+        sourceHandle: sourceIsLeftOfTarget
+          ? `source-right-${field.name}`
+          : `source-left-${field.name}`,
+        targetHandle: sourceIsLeftOfTarget
+          ? `target-left-${field.reference.field}`
+          : `target-right-${field.reference.field}`,
+        // type: "smoothstep",
+        type: "bezier",
         style: {
           stroke: "#3b82f6",
           strokeWidth: 1.5,
@@ -219,8 +237,13 @@ function getLayoutedElements(nodes: Node[], edges: Edge[]) {
 
 function buildInitialGraph(text: string) {
   const rawNodes = buildRawNodes(text);
-  const rawEdges = buildRawEdges(text);
-  return getLayoutedElements(rawNodes, rawEdges);
+  const layoutedNodes = getLayoutedElements(rawNodes, []).nodes;
+  const rawEdges = buildRawEdges(text, layoutedNodes);
+
+  return {
+    nodes: layoutedNodes,
+    edges: rawEdges,
+  };
 }
 
 function ERDBoardInner() {
@@ -251,12 +274,16 @@ function ERDBoardInner() {
 
   useEffect(() => {
     const nextRawNodes = buildRawNodes(debouncedText);
-    const nextEdges = buildRawEdges(debouncedText);
 
-    setNodes((prevNodes) =>
-      mergeNodesPreservingPositions(prevNodes, nextRawNodes),
-    );
-    setEdges(nextEdges);
+    setNodes((prevNodes) => {
+      const mergedNodes = mergeNodesPreservingPositions(
+        prevNodes,
+        nextRawNodes,
+      );
+      const nextEdges = buildRawEdges(debouncedText, mergedNodes);
+      setEdges(nextEdges);
+      return mergedNodes;
+    });
   }, [debouncedText, setNodes, setEdges]);
 
   useEffect(() => {
@@ -292,6 +319,10 @@ function ERDBoardInner() {
     };
   }, [isResizing]);
 
+  useEffect(() => {
+    setEdges(buildRawEdges(debouncedText, nodes));
+  }, [nodes, debouncedText, setEdges]);
+
   const clearAll = () => {
     setSchemaText("");
     setDebouncedText("");
@@ -301,7 +332,12 @@ function ERDBoardInner() {
   };
 
   const autoLayout = () => {
-    setNodes((prevNodes) => getLayoutedElements(prevNodes, edges).nodes);
+    setNodes((prevNodes) => {
+      const layoutedNodes = getLayoutedElements(prevNodes, edges).nodes;
+      const nextEdges = buildRawEdges(debouncedText, layoutedNodes);
+      setEdges(nextEdges);
+      return layoutedNodes;
+    });
   };
 
   const handleResizeStart = () => {
