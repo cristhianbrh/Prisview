@@ -246,63 +246,166 @@ function buildInitialGraph(text: string) {
   };
 }
 
-function mapFieldTypeToSQL(type: string) {
-  switch (type.toLowerCase()) {
+type SqlDialect = "postgres" | "mysql" | "sqlite";
+
+function mapFieldTypeToSQL(type: string, dialect: SqlDialect = "postgres") {
+  const normalized = type.toLowerCase();
+
+  switch (normalized) {
     case "int":
     case "integer":
       return "INTEGER";
     case "string":
+      return dialect === "mysql" ? "VARCHAR(255)" : "TEXT";
     case "text":
-      return "VARCHAR(255)";
+      return "TEXT";
     case "boolean":
     case "bool":
-      return "BOOLEAN";
+      return dialect === "sqlite" ? "INTEGER" : "BOOLEAN";
     case "date":
       return "DATE";
     case "datetime":
+      if (dialect === "mysql") return "DATETIME";
+      if (dialect === "sqlite") return "TEXT";
       return "TIMESTAMP";
     case "float":
-      return "FLOAT";
+      return dialect === "postgres" ? "REAL" : "FLOAT";
     case "uuid":
+      if (dialect === "mysql") return "CHAR(36)";
+      if (dialect === "sqlite") return "TEXT";
       return "UUID";
     default:
-      return "TEXT";
+      return type.toUpperCase();
   }
 }
 
-function generateSQLFromText(text: string) {
+function formatDefaultValue(
+  value: string | number | boolean | null | undefined,
+  dialect: SqlDialect = "postgres",
+) {
+  if (value === undefined) return null;
+  if (value === null) return "NULL";
+  if (typeof value === "number") return String(value);
+
+  if (typeof value === "boolean") {
+    if (dialect === "sqlite") return value ? "1" : "0";
+    return value ? "TRUE" : "FALSE";
+  }
+
+  const raw = String(value).trim();
+
+  if (raw.toLowerCase() === "now") {
+    if (dialect === "sqlite") return "CURRENT_TIMESTAMP";
+    return "CURRENT_TIMESTAMP";
+  }
+
+  if (raw.toLowerCase() === "true") {
+    return dialect === "sqlite" ? "1" : "TRUE";
+  }
+
+  if (raw.toLowerCase() === "false") {
+    return dialect === "sqlite" ? "0" : "FALSE";
+  }
+
+  if (raw.toLowerCase() === "uuid_generate_v4()") {
+    return dialect === "postgres" ? raw : `'${raw}'`;
+  }
+
+  return `'${raw.replace(/'/g, "''")}'`;
+}
+
+function quoteIdentifier(name: string, dialect: SqlDialect = "postgres") {
+  if (dialect === "mysql") return `\`${name}\``;
+  return `"${name}"`;
+}
+
+function generateSQLFromText(text: string, dialect: SqlDialect = "postgres") {
   const tables = parseSchema(text);
 
   return tables
     .map((table) => {
-      const columnLines: string[] = [];
-      const foreignKeys: string[] = [];
+      const lines: string[] = [];
 
-      table.fields.forEach((field) => {
-        const sqlType = mapFieldTypeToSQL(field.type);
+      for (const field of table.fields) {
+        const columnName = quoteIdentifier(field.name, dialect);
 
-        columnLines.push(
-          `  ${field.name} ${sqlType}${field.isPrimary ? " PRIMARY KEY" : ""}`,
-        );
+        const isSQLiteAutoPk =
+          dialect === "sqlite" &&
+          field.isPrimary &&
+          field.isAutoIncrement &&
+          ["int", "integer"].includes(field.type.toLowerCase());
 
-        if (field.reference) {
-          foreignKeys.push(
-            `  FOREIGN KEY (${field.name}) REFERENCES ${field.reference.table}(${field.reference.field})`,
-          );
+        let sqlType = mapFieldTypeToSQL(field.type, dialect);
+
+        if (field.isAutoIncrement) {
+          if (dialect === "postgres") {
+            sqlType = "SERIAL";
+          } else if (dialect === "mysql") {
+            sqlType = "INT";
+          } else if (isSQLiteAutoPk) {
+            sqlType = "INTEGER";
+          }
         }
-      });
 
-      const lines = [...columnLines, ...foreignKeys].join(",\n");
+        if (isSQLiteAutoPk) {
+          lines.push(`  ${columnName} INTEGER PRIMARY KEY AUTOINCREMENT`);
+          continue;
+        }
 
-      return `CREATE TABLE ${table.name} (\n${lines}\n);`;
+        const parts = [`  ${columnName}`, sqlType];
+
+        if (field.isPrimary) parts.push("PRIMARY KEY");
+        if (field.isUnique && !field.isPrimary) parts.push("UNIQUE");
+        if (field.isNullable === false) parts.push("NOT NULL");
+        if (field.isNullable === true && !field.isPrimary) parts.push("NULL");
+
+        if (field.isAutoIncrement && dialect === "mysql") {
+          parts.push("AUTO_INCREMENT");
+        }
+
+        const formattedDefault = formatDefaultValue(
+          field.defaultValue,
+          dialect,
+        );
+        if (formattedDefault !== null && !field.isAutoIncrement) {
+          parts.push(`DEFAULT ${formattedDefault}`);
+        }
+
+        lines.push(parts.join(" "));
+      }
+
+      for (const field of table.fields) {
+        if (!field.reference) continue;
+
+        lines.push(
+          `  FOREIGN KEY (${quoteIdentifier(field.name, dialect)}) REFERENCES ${quoteIdentifier(field.reference.table, dialect)}(${quoteIdentifier(field.reference.field, dialect)})`,
+        );
+      }
+
+      return `CREATE TABLE ${quoteIdentifier(table.name, dialect)} (\n${lines.join(",\n")}\n);`;
     })
     .join("\n\n");
+}
+
+function downloadTextFile(content: string, filename: string) {
+  const blob = new Blob([content], { type: "text/sql;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+
+  URL.revokeObjectURL(url);
 }
 
 function ERDBoardInner() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
+  const [sqlDialect, setSqlDialect] = useState<SqlDialect>("postgres");
   const [schemaText, setSchemaText] = useState(initialText);
   const [debouncedText, setDebouncedText] = useState(initialText);
   const [leftPanelWidth, setLeftPanelWidth] = useState(50);
@@ -318,14 +421,11 @@ function ERDBoardInner() {
   );
 
   const exportSQL = async () => {
-    const sql = generateSQLFromText(schemaText);
+    const sql = generateSQLFromText(schemaText, sqlDialect);
+    const extension =
+      sqlDialect === "postgres" ? "postgres.sql" : `${sqlDialect}.sql`;
 
-    try {
-      await navigator.clipboard.writeText(sql);
-      alert("SQL copiado al portapapeles");
-    } catch {
-      alert(sql);
-    }
+    downloadTextFile(sql, `schema.${extension}`);
   };
 
   useEffect(() => {
@@ -515,9 +615,19 @@ function ERDBoardInner() {
         <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 px-4 py-3">
           <button
             onClick={exportSQL}
-            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-blue-500 hover:text-blue-400"
+            className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 transition hover:border-blue-500 hover:text-blue-400"
           >
-            Exportar SQL
+            Descargar
+            <select
+              value={sqlDialect}
+              onChange={(e) => setSqlDialect(e.target.value as SqlDialect)}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-transparent text-blue-400 outline-none"
+            >
+              <option value="postgres">PostgreSQL</option>
+              <option value="mysql">MySQL</option>
+              <option value="sqlite">SQLite</option>
+            </select>
           </button>
 
           <button
