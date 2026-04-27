@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 
 interface EnumNodeData extends Record<string, unknown> {
@@ -7,7 +8,7 @@ interface EnumNodeData extends Record<string, unknown> {
 
 type EnumNodeType = Node<EnumNodeData, "enumNode">;
 
-export default function EnumNode({ data }: NodeProps<EnumNodeType>) {
+const EnumNode = memo(function EnumNode({ data }: NodeProps<EnumNodeType>) {
   return (
     <div className="relative min-w-44 overflow-hidden rounded-2xl border border-purple-700 bg-slate-800 shadow-2xl">
       <Handle
@@ -48,4 +49,6 @@ export default function EnumNode({ data }: NodeProps<EnumNodeType>) {
       </div>
     </div>
   );
-}
+});
+
+export default EnumNode;

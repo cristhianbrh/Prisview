@@ -115,12 +115,15 @@ function generateCreateTableSQL(
 
   return analysis.tables
     .map((table) => {
+      const primaryFields = table.fields.filter((f) => f.isPrimary);
+      const isCompositePk = primaryFields.length > 1;
       const lines: string[] = [];
 
       for (const field of table.fields) {
         const columnName = quoteIdentifier(field.name, dialect);
 
         const isSQLiteAutoPk =
+          !isCompositePk &&
           dialect === "sqlite" &&
           field.isPrimary &&
           field.isAutoIncrement &&
@@ -145,7 +148,7 @@ function generateCreateTableSQL(
 
         const parts = [`  ${columnName}`, sqlType];
 
-        if (field.isPrimary) parts.push("PRIMARY KEY");
+        if (field.isPrimary && !isCompositePk) parts.push("PRIMARY KEY");
         if (field.isUnique && !field.isPrimary) parts.push("UNIQUE");
         if (field.isNullable === false) parts.push("NOT NULL");
         if (field.isNullable === true && !field.isPrimary) parts.push("NULL");
@@ -169,6 +172,13 @@ function generateCreateTableSQL(
         }
 
         lines.push(parts.join(" "));
+      }
+
+      if (isCompositePk) {
+        const pkCols = primaryFields
+          .map((f) => quoteIdentifier(f.name, dialect))
+          .join(", ");
+        lines.push(`  PRIMARY KEY (${pkCols})`);
       }
 
       for (const field of table.fields) {

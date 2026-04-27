@@ -18,7 +18,7 @@ interface PrismaFieldMeta {
 interface PrismaModelMeta {
   name: string;
   fields: PrismaFieldMeta[];
-  hasCompositeId: boolean;
+  compositeIdFields: string[];
 }
 
 interface PrismaEnumMeta {
@@ -255,7 +255,7 @@ function parsePrismaModels(input: string): PrismaModelMeta[] {
         name: modelStart[1],
         mappedName: null,
         fields: [],
-        hasCompositeId: false,
+        compositeIdFields: [],
       };
       insideModel = true;
       continue;
@@ -266,7 +266,7 @@ function parsePrismaModels(input: string): PrismaModelMeta[] {
         models.push({
           name: currentModel.mappedName ?? currentModel.name,
           fields: currentModel.fields,
-          hasCompositeId: currentModel.hasCompositeId,
+          compositeIdFields: currentModel.compositeIdFields,
         });
       }
       currentModel = null;
@@ -285,7 +285,13 @@ function parsePrismaModels(input: string): PrismaModelMeta[] {
 
     // @@id([...]) — composite primary key
     if (line.startsWith("@@id(")) {
-      currentModel.hasCompositeId = true;
+      const idMatch = line.match(/@@id\(\s*\[([^\]]+)\]/);
+      if (idMatch) {
+        currentModel.compositeIdFields = idMatch[1]
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
       continue;
     }
 
@@ -434,6 +440,9 @@ function convertPrismaModelToDsl(
     const parts: string[] = [fieldName, dslType];
 
     const isId = field.attributes.includes("@id");
+    const isCompositeId =
+      model.compositeIdFields.includes(fieldName) ||
+      model.compositeIdFields.includes(field.name);
     // @unique may carry parameters: @unique or @unique(map: "name")
     const isUnique = field.attributes.some(
       (a) => a === "@unique" || a.startsWith("@unique("),
@@ -442,9 +451,9 @@ function convertPrismaModelToDsl(
       a.startsWith("@default(autoincrement"),
     );
 
-    if (isId) parts.push("pk");
+    if (isId || isCompositeId) parts.push("pk");
 
-    if (field.isOptional && !isId) {
+    if (field.isOptional && !isId && !isCompositeId) {
       parts.push("null");
     } else if (!field.isOptional) {
       parts.push("not", "null");
@@ -542,12 +551,6 @@ export function convertOrmToDsl(
     );
 
     parts.push(dsl);
-
-    if (model.hasCompositeId) {
-      warnings.push(
-        `"${model.name}" usa clave primaria compuesta (@@id) — no representable en DSL, importado sin pk.`,
-      );
-    }
 
     if (skippedArrayFields.length > 0) {
       warnings.push(

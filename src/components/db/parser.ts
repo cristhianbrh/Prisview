@@ -287,13 +287,6 @@ function validateTablesInternal(
       }
     }
 
-    if (primaryKeyCount > 1) {
-      errors.push({
-        table: table.name,
-        line: tableLineMap.get(table.name),
-        message: `La tabla "${table.name}" tiene múltiples claves primarias y todavía no soportas clave compuesta.`,
-      });
-    }
   }
 
   for (const table of tables) {

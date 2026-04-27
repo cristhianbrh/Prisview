@@ -149,6 +149,10 @@ function ERDBoardInner() {
   const [importErrors, setImportErrors] = useState<string[]>([]);
   const [importWarnings, setImportWarnings] = useState<string[]>([]);
   const [isImporting, setIsImporting] = useState(false);
+  const [isReadingFile, setIsReadingFile] = useState(false);
+  const [isCanvasLoading, setIsCanvasLoading] = useState(false);
+  const isDraggingRef = useRef(false);
+  const positionPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const diagramExportRef = useRef<HTMLDivElement | null>(null);
   const [isCopyingImage, setIsCopyingImage] = useState(false);
 
@@ -231,17 +235,19 @@ function ERDBoardInner() {
   }, [sqlDialect]);
 
   useEffect(() => {
-    const positions = Object.fromEntries(
-      nodes.map((node) => [
-        node.id,
-        {
-          x: node.position.x,
-          y: node.position.y,
-        },
-      ]),
-    );
+    if (positionPersistTimerRef.current !== null) {
+      clearTimeout(positionPersistTimerRef.current);
+    }
 
-    setStoredValue(STORAGE_KEYS.nodePositions, JSON.stringify(positions));
+    positionPersistTimerRef.current = setTimeout(() => {
+      const positions = Object.fromEntries(
+        nodes.map((node) => [
+          node.id,
+          { x: node.position.x, y: node.position.y },
+        ]),
+      );
+      setStoredValue(STORAGE_KEYS.nodePositions, JSON.stringify(positions));
+    }, 400);
   }, [nodes]);
 
   const downloadSQL = () => {
@@ -360,6 +366,8 @@ function ERDBoardInner() {
     const normalizedImported = importedSchemaText.trim();
     if (!normalizedImported) return;
 
+    setIsCanvasLoading(true);
+
     setSchemaText((prev) => {
       const trimmedPrev = prev.trim();
       if (!trimmedPrev) return normalizedImported;
@@ -400,6 +408,8 @@ function ERDBoardInner() {
     if (!file) return;
 
     setImportErrors([]);
+    setImportText("");
+    setIsReadingFile(true);
 
     try {
       const text = await file.text();
@@ -407,6 +417,7 @@ function ERDBoardInner() {
     } catch {
       setImportErrors(["No pude leer el archivo seleccionado."]);
     } finally {
+      setIsReadingFile(false);
       event.target.value = "";
     }
   };
@@ -539,11 +550,22 @@ function ERDBoardInner() {
     );
 
     setNodes(mergedNodes);
+    setIsCanvasLoading(false);
   }, [debouncedSchemaAnalysis, setNodes]);
 
   useEffect(() => {
+    if (isDraggingRef.current) return;
     setEdges(buildRawEdges(debouncedSchemaAnalysis.text, nodes));
   }, [nodes, debouncedSchemaAnalysis, setEdges]);
+
+  const handleNodeDragStart = () => {
+    isDraggingRef.current = true;
+  };
+
+  const handleNodeDragStop = () => {
+    isDraggingRef.current = false;
+    setEdges(buildRawEdges(debouncedSchemaAnalysis.text, nodesRef.current));
+  };
 
   useEffect(() => {
     if (!showSqlPreview) return;
@@ -793,7 +815,15 @@ function ERDBoardInner() {
         <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-slate-700 transition group-hover:bg-blue-500" />
       </div>
 
-      <section className="h-full min-w-0 flex-1 bg-slate-950">
+      <section className="relative h-full min-w-0 flex-1 bg-slate-950">
+        {isCanvasLoading ? (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm">
+            <div className="flex flex-col items-center gap-3">
+              <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-600 border-t-blue-400" />
+              <span className="text-xs text-slate-400">Construyendo diagrama…</span>
+            </div>
+          </div>
+        ) : null}
         <div ref={diagramExportRef} className="h-full w-full bg-slate-950">
           <ReactFlow
             nodes={nodes}
@@ -802,6 +832,8 @@ function ERDBoardInner() {
             onEdgesChange={onEdgesChange}
             nodeTypes={nodeTypes}
             onMoveEnd={handleMoveEnd}
+            onNodeDragStart={handleNodeDragStart}
+            onNodeDragStop={handleNodeDragStop}
             proOptions={{ hideAttribution: true }}
             onInit={handleInit}
           >
@@ -881,12 +913,21 @@ function ERDBoardInner() {
                     Selecciona un archivo ORM
                   </label>
 
-                  <input
-                    type="file"
-                    accept=".prisma,.txt,.schema"
-                    onChange={handleImportFileChange}
-                    className="block w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-300 file:mr-3 file:rounded-md file:border-0 file:bg-slate-800 file:px-3 file:py-2 file:text-sm file:text-slate-200"
-                  />
+                  <div className="relative">
+                    <input
+                      type="file"
+                      accept=".prisma,.txt,.schema"
+                      onChange={handleImportFileChange}
+                      disabled={isReadingFile}
+                      className="block w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-300 file:mr-3 file:rounded-md file:border-0 file:bg-slate-800 file:px-3 file:py-2 file:text-sm file:text-slate-200 disabled:opacity-50"
+                    />
+                    {isReadingFile ? (
+                      <div className="absolute inset-0 flex items-center justify-center gap-2 rounded-xl bg-slate-950/80">
+                        <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-600 border-t-blue-400" />
+                        <span className="text-xs text-slate-400">Leyendo archivo…</span>
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               ) : null}
 

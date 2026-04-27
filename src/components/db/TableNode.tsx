@@ -5,7 +5,7 @@ import {
   type Node,
   type NodeProps,
 } from "@xyflow/react";
-import { useEffect } from "react";
+import { memo, useEffect } from "react";
 
 interface TableNodeData extends Record<string, unknown> {
   label: string;
@@ -23,7 +23,7 @@ interface TableNodeData extends Record<string, unknown> {
 
 type TableNodeType = Node<TableNodeData, "tableNode">;
 
-export default function TableNode({ id, data }: NodeProps<TableNodeType>) {
+const TableNode = memo(function TableNode({ id, data }: NodeProps<TableNodeType>) {
   const updateNodeInternals = useUpdateNodeInternals();
 
   useEffect(() => {
@@ -108,4 +108,6 @@ export default function TableNode({ id, data }: NodeProps<TableNodeType>) {
       </div>
     </div>
   );
-}
+});
+
+export default TableNode;
