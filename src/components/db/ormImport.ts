@@ -18,6 +18,7 @@ interface PrismaFieldMeta {
 interface PrismaModelMeta {
   name: string;
   fields: PrismaFieldMeta[];
+  hasCompositeId: boolean;
 }
 
 interface PrismaEnumMeta {
@@ -127,8 +128,9 @@ function mapTypeWithDbHint(rawType: string, attributes: string[]): string {
         return "text";
       if (hint === "json" || hint === "jsonb") return "text";
       if (hint === "smallint" || hint === "tinyint") return "int";
+      if (hint === "decimal" || hint === "numeric") return "float";
       if (hint === "doubleprecision" || hint === "real") return "float";
-      if (hint === "timestamp") return "datetime";
+      if (hint === "timestamp" || hint === "datetime") return "datetime";
       if (hint === "date") return "date";
       if (
         hint === "varchar" ||
@@ -249,7 +251,12 @@ function parsePrismaModels(input: string): PrismaModelMeta[] {
 
     const modelStart = line.match(/^model\s+([A-Za-z_]\w*)\s*\{$/);
     if (modelStart && !insideModel) {
-      currentModel = { name: modelStart[1], mappedName: null, fields: [] };
+      currentModel = {
+        name: modelStart[1],
+        mappedName: null,
+        fields: [],
+        hasCompositeId: false,
+      };
       insideModel = true;
       continue;
     }
@@ -259,6 +266,7 @@ function parsePrismaModels(input: string): PrismaModelMeta[] {
         models.push({
           name: currentModel.mappedName ?? currentModel.name,
           fields: currentModel.fields,
+          hasCompositeId: currentModel.hasCompositeId,
         });
       }
       currentModel = null;
@@ -272,6 +280,12 @@ function parsePrismaModels(input: string): PrismaModelMeta[] {
     const tableMapMatch = line.match(/^@@map\(["']([^"']+)["']\)/);
     if (tableMapMatch) {
       currentModel.mappedName = tableMapMatch[1];
+      continue;
+    }
+
+    // @@id([...]) — composite primary key
+    if (line.startsWith("@@id(")) {
+      currentModel.hasCompositeId = true;
       continue;
     }
 
@@ -394,10 +408,8 @@ function convertPrismaModelToDsl(
   const skippedArrayFields: string[] = [];
 
   for (const field of model.fields) {
-    // Skip back-reference / list relation fields (e.g. `posts Post[]`)
-    if (allModelNames.has(field.rawType) || (field.isArray && allModelNames.has(field.rawType))) {
-      continue;
-    }
+    // Skip back-reference / list relation fields (e.g. `posts Post[]`, `user User`)
+    if (allModelNames.has(field.rawType)) continue;
 
     // Skip @ignore fields
     if (field.attributes.some((a) => a === "@ignore")) continue;
@@ -422,7 +434,10 @@ function convertPrismaModelToDsl(
     const parts: string[] = [fieldName, dslType];
 
     const isId = field.attributes.includes("@id");
-    const isUnique = field.attributes.includes("@unique");
+    // @unique may carry parameters: @unique or @unique(map: "name")
+    const isUnique = field.attributes.some(
+      (a) => a === "@unique" || a.startsWith("@unique("),
+    );
     const hasAutoincrement = field.attributes.some((a) =>
       a.startsWith("@default(autoincrement"),
     );
@@ -527,6 +542,12 @@ export function convertOrmToDsl(
     );
 
     parts.push(dsl);
+
+    if (model.hasCompositeId) {
+      warnings.push(
+        `"${model.name}" usa clave primaria compuesta (@@id) — no representable en DSL, importado sin pk.`,
+      );
+    }
 
     if (skippedArrayFields.length > 0) {
       warnings.push(
