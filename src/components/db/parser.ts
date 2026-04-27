@@ -1,4 +1,9 @@
-import type { Field, TableSchema, SchemaValidationResult } from "./types";
+import type {
+  Field,
+  TableSchema,
+  SchemaValidationResult,
+  EnumSchema,
+} from "./types";
 
 export interface SchemaAnalysis {
   sourceText: string;
@@ -7,6 +12,8 @@ export interface SchemaAnalysis {
   tableLineMap: Map<string, number>;
   fieldLineMap: Map<string, number>;
   allFieldNames: string[];
+  enums: EnumSchema[];
+  enumMap: Map<string, EnumSchema>;
   validation: SchemaValidationResult;
 }
 
@@ -139,11 +146,15 @@ function normalizeType(type: string) {
   return value;
 }
 
-function buildTablesFromSource(input: string): TableSchema[] {
+function buildSourceElements(input: string): {
+  tables: TableSchema[];
+  enums: EnumSchema[];
+} {
   const lines = input.split("\n");
-
   const tables: TableSchema[] = [];
+  const enums: EnumSchema[] = [];
   let currentTable: TableSchema | null = null;
+  let currentEnum: EnumSchema | null = null;
 
   for (const rawLine of lines) {
     if (!rawLine.trim()) continue;
@@ -152,11 +163,23 @@ function buildTablesFromSource(input: string): TableSchema[] {
 
     if (!isFieldLine) {
       if (currentTable) tables.push(currentTable);
+      if (currentEnum) enums.push(currentEnum);
+      currentTable = null;
+      currentEnum = null;
 
-      currentTable = {
-        name: rawLine.trim(),
-        fields: [],
-      };
+      const trimmed = rawLine.trim();
+      const enumMatch = trimmed.match(/^enum\s+([A-Za-z_]\w*)$/);
+      if (enumMatch) {
+        currentEnum = { name: enumMatch[1], values: [] };
+      } else {
+        currentTable = { name: trimmed, fields: [] };
+      }
+      continue;
+    }
+
+    if (currentEnum) {
+      const value = rawLine.trim();
+      if (value) currentEnum.values.push(value);
       continue;
     }
 
@@ -167,8 +190,8 @@ function buildTablesFromSource(input: string): TableSchema[] {
   }
 
   if (currentTable) tables.push(currentTable);
-
-  return tables;
+  if (currentEnum) enums.push(currentEnum);
+  return { tables, enums };
 }
 
 function buildLineMaps(sourceText: string) {
@@ -177,6 +200,7 @@ function buildLineMaps(sourceText: string) {
 
   const lines = sourceText.split("\n");
   let currentTable: string | null = null;
+  let inEnumBlock = false;
 
   lines.forEach((rawLine, index) => {
     const lineNumber = index + 1;
@@ -185,12 +209,20 @@ function buildLineMaps(sourceText: string) {
     const isFieldLine = /^\s+/.test(rawLine);
 
     if (!isFieldLine) {
-      currentTable = rawLine.trim();
+      const trimmed = rawLine.trim();
+      const enumMatch = trimmed.match(/^enum\s+([A-Za-z_]\w*)$/);
+      if (enumMatch) {
+        inEnumBlock = true;
+        currentTable = null;
+        return;
+      }
+      inEnumBlock = false;
+      currentTable = trimmed;
       tableLineMap.set(currentTable, lineNumber);
       return;
     }
 
-    if (!currentTable) return;
+    if (inEnumBlock || !currentTable) return;
 
     const parts = rawLine.trim().split(/\s+/);
     if (parts.length >= 1) {
@@ -205,6 +237,7 @@ function validateTablesInternal(
   tables: TableSchema[],
   tableLineMap: Map<string, number>,
   fieldLineMap: Map<string, number>,
+  enumMap: Map<string, EnumSchema>,
 ): SchemaValidationResult {
   const errors: SchemaValidationResult["errors"] = [];
 
@@ -293,6 +326,9 @@ function validateTablesInternal(
         continue;
       }
 
+      // Skip type mismatch check when either side uses an enum type.
+      if (enumMap.has(field.type) || enumMap.has(targetField.type)) continue;
+
       const sourceType = normalizeType(field.type);
       const targetType = normalizeType(targetField.type);
 
@@ -318,7 +354,7 @@ export function analyzeSchema(sourceText: string): SchemaAnalysis {
     return lastAnalysisCache;
   }
 
-  const tables = buildTablesFromSource(sourceText);
+  const { tables, enums } = buildSourceElements(sourceText);
   const { tableLineMap, fieldLineMap } = buildLineMaps(sourceText);
 
   const allFieldNames = Array.from(
@@ -326,7 +362,13 @@ export function analyzeSchema(sourceText: string): SchemaAnalysis {
   );
 
   const tableMap = new Map(tables.map((table) => [table.name, table]));
-  const validation = validateTablesInternal(tables, tableLineMap, fieldLineMap);
+  const enumMap = new Map(enums.map((e) => [e.name, e]));
+  const validation = validateTablesInternal(
+    tables,
+    tableLineMap,
+    fieldLineMap,
+    enumMap,
+  );
 
   const analysis: SchemaAnalysis = {
     sourceText,
@@ -335,6 +377,8 @@ export function analyzeSchema(sourceText: string): SchemaAnalysis {
     tableLineMap,
     fieldLineMap,
     allFieldNames,
+    enums,
+    enumMap,
     validation,
   };
 
@@ -350,14 +394,13 @@ export function validateSchema(
   tables: TableSchema[],
   sourceText?: string,
 ): SchemaValidationResult {
-  // Cuando tenemos el sourceText, usamos el análisis compartido para evitar
-  // reprocesar lógicas en sitios distintos.
   if (typeof sourceText === "string") {
     return analyzeSchema(sourceText).validation;
   }
 
   const tableLineMap = new Map<string, number>();
   const fieldLineMap = new Map<string, number>();
+  const enumMap = new Map<string, EnumSchema>();
 
-  return validateTablesInternal(tables, tableLineMap, fieldLineMap);
+  return validateTablesInternal(tables, tableLineMap, fieldLineMap, enumMap);
 }

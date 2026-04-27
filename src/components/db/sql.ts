@@ -1,8 +1,13 @@
 import { analyzeSchema, type SchemaAnalysis } from "./schemaAnalysis";
+import type { EnumSchema } from "./types";
 
 export type SqlDialect = "postgres" | "mysql" | "sqlite";
 
-function mapFieldTypeToSQL(type: string, dialect: SqlDialect = "postgres") {
+function mapFieldTypeToSQL(
+  type: string,
+  dialect: SqlDialect,
+  enumMap: Map<string, EnumSchema>,
+): string {
   const normalized = type.toLowerCase();
 
   switch (normalized) {
@@ -36,8 +41,23 @@ function mapFieldTypeToSQL(type: string, dialect: SqlDialect = "postgres") {
       if (dialect === "sqlite") return "TEXT";
       return "UUID";
 
-    default:
+    default: {
+      // Check if it's a known enum type
+      const enumDef = enumMap.get(type);
+      if (enumDef) {
+        if (dialect === "mysql") {
+          const values = enumDef.values.map((v) => `'${v}'`).join(", ");
+          return `ENUM(${values})`;
+        }
+        if (dialect === "sqlite") {
+          // Inline CHECK constraint handled separately
+          return "TEXT";
+        }
+        // PostgreSQL: reference the created type
+        return quoteIdentifier(type, dialect);
+      }
       return type.toUpperCase();
+    }
   }
 }
 
@@ -73,10 +93,26 @@ function quoteIdentifier(name: string, dialect: SqlDialect = "postgres") {
   return `"${name}"`;
 }
 
+function generateEnumDDL(
+  enums: EnumSchema[],
+  dialect: SqlDialect,
+): string {
+  if (enums.length === 0 || dialect !== "postgres") return "";
+
+  return enums
+    .map((e) => {
+      const values = e.values.map((v) => `'${v}'`).join(", ");
+      return `CREATE TYPE ${quoteIdentifier(e.name, dialect)} AS ENUM (${values});`;
+    })
+    .join("\n");
+}
+
 function generateCreateTableSQL(
   analysis: SchemaAnalysis,
   dialect: SqlDialect,
 ): string {
+  const { enumMap } = analysis;
+
   return analysis.tables
     .map((table) => {
       const lines: string[] = [];
@@ -90,7 +126,7 @@ function generateCreateTableSQL(
           field.isAutoIncrement &&
           ["int", "integer"].includes(field.type.toLowerCase());
 
-        let sqlType = mapFieldTypeToSQL(field.type, dialect);
+        let sqlType = mapFieldTypeToSQL(field.type, dialect, enumMap);
 
         if (field.isAutoIncrement) {
           if (dialect === "postgres") {
@@ -118,12 +154,18 @@ function generateCreateTableSQL(
           parts.push("AUTO_INCREMENT");
         }
 
-        const formattedDefault = formatDefaultValue(
-          field.defaultValue,
-          dialect,
-        );
+        const formattedDefault = formatDefaultValue(field.defaultValue, dialect);
         if (formattedDefault !== null && !field.isAutoIncrement) {
           parts.push(`DEFAULT ${formattedDefault}`);
+        }
+
+        // SQLite inline CHECK for enum types
+        if (dialect === "sqlite") {
+          const enumDef = enumMap.get(field.type);
+          if (enumDef && enumDef.values.length > 0) {
+            const allowed = enumDef.values.map((v) => `'${v}'`).join(", ");
+            parts.push(`CHECK (${columnName} IN (${allowed}))`);
+          }
         }
 
         lines.push(parts.join(" "));
@@ -146,11 +188,12 @@ export function generateSQLFromAnalysis(
   analysis: SchemaAnalysis,
   dialect: SqlDialect = "postgres",
 ) {
-  if (!analysis.validation.valid) {
-    return "";
-  }
+  if (!analysis.validation.valid) return "";
 
-  return generateCreateTableSQL(analysis, dialect);
+  const enumDDL = generateEnumDDL(analysis.enums, dialect);
+  const tableDDL = generateCreateTableSQL(analysis, dialect);
+
+  return enumDDL ? `${enumDDL}\n\n${tableDDL}` : tableDDL;
 }
 
 export function generateSQLFromText(

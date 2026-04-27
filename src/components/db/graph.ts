@@ -1,6 +1,7 @@
 import dagre from "@dagrejs/dagre";
 import { MarkerType, Position, type Edge, type Node } from "@xyflow/react";
 import { analyzeSchema } from "./parser";
+import type { EnumSchema, TableSchema } from "./types";
 
 const NODE_WIDTH = 280;
 const NODE_HEIGHT = 180;
@@ -11,8 +12,13 @@ const START_Y = 80;
 
 export type NodePositionMap = Record<string, { x: number; y: number }>;
 
+// ---------------------------------------------------------------------------
+// Node builders
+// ---------------------------------------------------------------------------
+
 function buildRawNodesFromTables(
-  tables: ReturnType<typeof analyzeSchema>["tables"],
+  tables: TableSchema[],
+  enumNames: Set<string>,
 ): Node[] {
   return tables.map((table) => ({
     id: table.name,
@@ -20,7 +26,10 @@ function buildRawNodesFromTables(
     position: { x: 0, y: 0 },
     data: {
       label: table.name,
-      fields: table.fields,
+      fields: table.fields.map((f) => ({
+        ...f,
+        isEnumType: enumNames.has(f.type),
+      })),
     },
     draggable: true,
     sourcePosition: Position.Right,
@@ -28,8 +37,25 @@ function buildRawNodesFromTables(
   }));
 }
 
+function buildRawEnumNodes(enums: EnumSchema[]): Node[] {
+  return enums.map((e) => ({
+    id: `__enum__${e.name}`,
+    type: "enumNode",
+    position: { x: 0, y: 0 },
+    data: {
+      label: e.name,
+      values: e.values,
+    },
+    draggable: true,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Edge builders
+// ---------------------------------------------------------------------------
+
 function buildRawEdgesFromTables(
-  tables: ReturnType<typeof analyzeSchema>["tables"],
+  tables: TableSchema[],
   positionedNodes: Node[],
 ): Edge[] {
   const edges: Edge[] = [];
@@ -79,13 +105,80 @@ function buildRawEdgesFromTables(
   return edges;
 }
 
+function buildEnumEdgesFromTables(
+  tables: TableSchema[],
+  enumNames: Set<string>,
+  positionedNodes: Node[],
+): Edge[] {
+  const edges: Edge[] = [];
+  const nodeMap = new Map(positionedNodes.map((n) => [n.id, n]));
+
+  for (const table of tables) {
+    for (const field of table.fields) {
+      if (!enumNames.has(field.type)) continue;
+
+      const sourceNode = nodeMap.get(table.name);
+      const targetNode = nodeMap.get(`__enum__${field.type}`);
+      if (!sourceNode || !targetNode) continue;
+
+      const sourceCenterX = sourceNode.position.x + NODE_WIDTH / 2;
+      const targetCenterX = targetNode.position.x + NODE_WIDTH / 2;
+      const sourceIsLeftOfTarget = sourceCenterX < targetCenterX;
+
+      edges.push({
+        id: `enum-${table.name}-${field.name}-${field.type}`,
+        source: table.name,
+        target: `__enum__${field.type}`,
+        sourceHandle: sourceIsLeftOfTarget
+          ? `source-right-${field.name}`
+          : `source-left-${field.name}`,
+        targetHandle: sourceIsLeftOfTarget
+          ? "enum-target-left"
+          : "enum-target-right",
+        type: "bezier",
+        style: {
+          stroke: "#a855f7",
+          strokeWidth: 1.5,
+          strokeDasharray: "6 3",
+        },
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          width: 16,
+          height: 16,
+          color: "#a855f7",
+        },
+      });
+    }
+  }
+
+  return edges;
+}
+
+// ---------------------------------------------------------------------------
+// Public builders
+// ---------------------------------------------------------------------------
+
 export function buildRawNodes(text: string): Node[] {
-  return buildRawNodesFromTables(analyzeSchema(text).tables);
+  const analysis = analyzeSchema(text);
+  const enumNames = new Set(analysis.enums.map((e) => e.name));
+  return [
+    ...buildRawNodesFromTables(analysis.tables, enumNames),
+    ...buildRawEnumNodes(analysis.enums),
+  ];
 }
 
 export function buildRawEdges(text: string, positionedNodes: Node[]): Edge[] {
-  return buildRawEdgesFromTables(analyzeSchema(text).tables, positionedNodes);
+  const analysis = analyzeSchema(text);
+  const enumNames = new Set(analysis.enums.map((e) => e.name));
+  return [
+    ...buildRawEdgesFromTables(analysis.tables, positionedNodes),
+    ...buildEnumEdgesFromTables(analysis.tables, enumNames, positionedNodes),
+  ];
 }
+
+// ---------------------------------------------------------------------------
+// Position helpers
+// ---------------------------------------------------------------------------
 
 function rectsOverlap(
   a: { x: number; y: number; width: number; height: number },
@@ -124,10 +217,7 @@ function findFreePosition(existingNodes: Node[]) {
     }
   }
 
-  return {
-    x: START_X,
-    y: START_Y,
-  };
+  return { x: START_X, y: START_Y };
 }
 
 export function hydrateNodePositions(
@@ -137,11 +227,7 @@ export function hydrateNodePositions(
   return nodes.map((node) => {
     const persisted = persistedPositions[node.id];
     if (!persisted) return node;
-
-    return {
-      ...node,
-      position: persisted,
-    };
+    return { ...node, position: persisted };
   });
 }
 
@@ -168,17 +254,11 @@ export function mergeNodesPreservingPositions(
 
     const persisted = persistedPositions[rawNode.id];
     if (persisted) {
-      merged.push({
-        ...rawNode,
-        position: persisted,
-      });
+      merged.push({ ...rawNode, position: persisted });
       continue;
     }
 
-    merged.push({
-      ...rawNode,
-      position: findFreePosition(merged),
-    });
+    merged.push({ ...rawNode, position: findFreePosition(merged) });
   }
 
   return merged;
@@ -211,7 +291,6 @@ export function getLayoutedElements(nodes: Node[], edges: Edge[]) {
 
   const layoutedNodes = nodes.map((node) => {
     const positioned = graph.node(node.id);
-
     return {
       ...node,
       position: {
@@ -221,10 +300,7 @@ export function getLayoutedElements(nodes: Node[], edges: Edge[]) {
     };
   });
 
-  return {
-    nodes: layoutedNodes,
-    edges,
-  };
+  return { nodes: layoutedNodes, edges };
 }
 
 export function buildInitialGraph(
@@ -232,15 +308,32 @@ export function buildInitialGraph(
   persistedPositions: NodePositionMap,
 ) {
   const analysis = analyzeSchema(text);
-  const rawNodes = buildRawNodesFromTables(analysis.tables);
-  const rawEdges = buildRawEdgesFromTables(analysis.tables, rawNodes);
+  const enumNames = new Set(analysis.enums.map((e) => e.name));
+
+  const rawTableNodes = buildRawNodesFromTables(analysis.tables, enumNames);
+  const rawEnumNodes = buildRawEnumNodes(analysis.enums);
+  const rawNodes = [...rawTableNodes, ...rawEnumNodes];
+
+  const rawFkEdges = buildRawEdgesFromTables(analysis.tables, rawNodes);
+  const rawEnumEdges = buildEnumEdgesFromTables(
+    analysis.tables,
+    enumNames,
+    rawNodes,
+  );
+  const rawEdges = [...rawFkEdges, ...rawEnumEdges];
 
   const layoutedNodes = getLayoutedElements(rawNodes, rawEdges).nodes;
   const hydratedNodes = hydrateNodePositions(layoutedNodes, persistedPositions);
-  const hydratedEdges = buildRawEdgesFromTables(analysis.tables, hydratedNodes);
+
+  const fkEdges = buildRawEdgesFromTables(analysis.tables, hydratedNodes);
+  const enumEdges = buildEnumEdgesFromTables(
+    analysis.tables,
+    enumNames,
+    hydratedNodes,
+  );
 
   return {
     nodes: hydratedNodes,
-    edges: hydratedEdges,
+    edges: [...fkEdges, ...enumEdges],
   };
 }

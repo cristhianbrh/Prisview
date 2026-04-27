@@ -16,6 +16,7 @@ import { linter, lintGutter } from "@codemirror/lint";
 import { EditorView } from "@codemirror/view";
 
 import TableNode from "./TableNode";
+import EnumNode from "./EnumNode";
 import { schemaCompletionSource } from "./autocomplete";
 import { convertOrmToDsl, type SupportedOrmType } from "./ormImport";
 import {
@@ -55,6 +56,7 @@ Comment
 
 const nodeTypes: NodeTypes = {
   tableNode: TableNode as NodeTypes[string],
+  enumNode: EnumNode as NodeTypes[string],
 };
 
 const STORAGE_KEYS = {
@@ -145,6 +147,7 @@ function ERDBoardInner() {
     useState<SupportedOrmType>("prisma");
   const [importText, setImportText] = useState("");
   const [importErrors, setImportErrors] = useState<string[]>([]);
+  const [importWarnings, setImportWarnings] = useState<string[]>([]);
   const [isImporting, setIsImporting] = useState(false);
   const diagramExportRef = useRef<HTMLDivElement | null>(null);
   const [isCopyingImage, setIsCopyingImage] = useState(false);
@@ -336,6 +339,7 @@ function ERDBoardInner() {
     setImportOrmType("prisma");
     setImportText("");
     setImportErrors([]);
+    setImportWarnings([]);
     setIsImporting(false);
   };
 
@@ -349,24 +353,24 @@ function ERDBoardInner() {
     resetImportPanel();
   };
 
-  const applyImportedSchema = (importedSchemaText: string) => {
+  const applyImportedSchema = (
+    importedSchemaText: string,
+    keepPanelOpen = false,
+  ) => {
     const normalizedImported = importedSchemaText.trim();
     if (!normalizedImported) return;
 
     setSchemaText((prev) => {
       const trimmedPrev = prev.trim();
-
-      if (!trimmedPrev) {
-        return normalizedImported;
-      }
-
+      if (!trimmedPrev) return normalizedImported;
       return `${trimmedPrev}\n\n${normalizedImported}`;
     });
 
     setShowSqlPreview(false);
     setSqlPreview("");
     setSchemaErrors([]);
-    closeImportPanel();
+
+    if (!keepPanelOpen) closeImportPanel();
   };
 
   const handleImportSave = async () => {
@@ -381,7 +385,9 @@ function ERDBoardInner() {
         return;
       }
 
-      applyImportedSchema(result.schemaText);
+      const warnings = result.warnings ?? [];
+      setImportWarnings(warnings);
+      applyImportedSchema(result.schemaText, warnings.length > 0);
     } finally {
       setIsImporting(false);
     }
@@ -918,6 +924,19 @@ model Post {
                   <ul className="space-y-1 text-sm text-red-200">
                     {importErrors.map((error, index) => (
                       <li key={`${error}-${index}`}>- {error}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {importWarnings.length > 0 ? (
+                <div className="rounded-2xl border border-yellow-900/40 bg-yellow-950/30 px-4 py-3">
+                  <p className="mb-2 text-sm font-medium text-yellow-300">
+                    Importado con advertencias:
+                  </p>
+                  <ul className="space-y-1 text-sm text-yellow-200">
+                    {importWarnings.map((w, index) => (
+                      <li key={`${w}-${index}`}>- {w}</li>
                     ))}
                   </ul>
                 </div>

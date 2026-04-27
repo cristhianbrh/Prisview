@@ -13,6 +13,7 @@ interface TableNodeData extends Record<string, unknown> {
     name: string;
     type: string;
     isPrimary?: boolean;
+    isEnumType?: boolean;
     reference?: {
       table: string;
       field: string;
@@ -59,13 +60,13 @@ export default function TableNode({ id, data }: NodeProps<TableNodeType>) {
               style={{ top: "50%", transform: "translateY(-50%)" }}
             />
 
-            {field.reference ? (
+            {(field.reference || field.isEnumType) ? (
               <>
                 <Handle
                   type="source"
                   position={Position.Left}
                   id={`source-left-${field.name}`}
-                  className="-left-1.5! h-3! w-3! border-blue-300! bg-blue-500!"
+                  className={`-left-1.5! h-3! w-3! ${field.isEnumType && !field.reference ? "border-purple-300! bg-purple-500!" : "border-blue-300! bg-blue-500!"}`}
                   style={{ top: "50%", transform: "translateY(-50%)" }}
                 />
 
@@ -73,7 +74,7 @@ export default function TableNode({ id, data }: NodeProps<TableNodeType>) {
                   type="source"
                   position={Position.Right}
                   id={`source-right-${field.name}`}
-                  className="-right-1.5! h-3! w-3! border-blue-300! bg-blue-500!"
+                  className={`-right-1.5! h-3! w-3! ${field.isEnumType && !field.reference ? "border-purple-300! bg-purple-500!" : "border-blue-300! bg-blue-500!"}`}
                   style={{ top: "50%", transform: "translateY(-50%)" }}
                 />
               </>
@@ -89,6 +90,12 @@ export default function TableNode({ id, data }: NodeProps<TableNodeType>) {
               {field.reference ? (
                 <span className="rounded bg-slate-700 px-1.5 py-0.5 text-[10px] font-medium text-slate-300">
                   ∞→1
+                </span>
+              ) : null}
+
+              {field.isEnumType && !field.reference ? (
+                <span className="rounded bg-purple-500/15 px-1.5 py-0.5 text-[10px] font-medium text-purple-400">
+                  enum
                 </span>
               ) : null}
 

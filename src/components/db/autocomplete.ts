@@ -184,7 +184,48 @@ export function schemaCompletionSource(
   }
 
   if (isFieldLine) {
-    const keywordAndTypeOptions = staticSchemaKeywords.filter(
+    // Suggest enum values when "default" keyword precedes the cursor
+    const defaultEnumMatch = beforeCursor.match(
+      /^\s+\S+\s+([A-Za-z_]\w*)\s+(?:\S+\s+)*default\s+(\w*)$/,
+    );
+    if (defaultEnumMatch) {
+      const fieldType = defaultEnumMatch[1];
+      const valuePrefix = defaultEnumMatch[2] ?? "";
+      const enumDef = analysis.enumMap.get(fieldType);
+      if (enumDef) {
+        return {
+          from,
+          options: sortCompletions(
+            enumDef.values
+              .filter(
+                (v) =>
+                  valuePrefix === "" ||
+                  startsWithInsensitive(v, valuePrefix),
+              )
+              .map((v) => ({
+                label: v,
+                type: "enum",
+                detail: `${fieldType} value`,
+                boost: 95,
+              })),
+            valuePrefix,
+          ),
+          validFor: /^[A-Za-z_]\w*$/,
+        };
+      }
+    }
+
+    const enumTypeOptions: Completion[] = analysis.enums.map((e) => ({
+      label: e.name,
+      type: "type",
+      detail: "enum",
+      boost: 66,
+    }));
+
+    const keywordAndTypeOptions = [
+      ...staticSchemaKeywords,
+      ...enumTypeOptions,
+    ].filter(
       (item) =>
         text === "" ||
         startsWithInsensitive(item.label, text) ||

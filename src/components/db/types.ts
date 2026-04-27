@@ -10,6 +10,11 @@ export type FieldType =
   | "float"
   | "uuid";
 
+export interface EnumSchema {
+  name: string;
+  values: string[];
+}
+
 export interface FieldReference {
   table: string;
   field: string;
